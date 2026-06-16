@@ -1,8 +1,8 @@
 use anyhow::Result;
 
+use super::Reporter;
 use crate::git::format_duration;
 use crate::models::{Freshness, RepoSummary, Repository};
-use super::Reporter;
 
 pub struct MarkdownReporter;
 
@@ -67,25 +67,34 @@ impl Reporter for MarkdownReporter {
         }
 
         // Repositories needing attention
-        let needs_attention: Vec<_> = repos.iter()
+        let needs_attention: Vec<_> = repos
+            .iter()
             .filter(|r| r.freshness == Freshness::HasUpdates || r.dirty)
             .collect();
 
         if !needs_attention.is_empty() {
             md.push_str("## ⚠️ 需要关注的仓库\n\n");
-            
+
             for repo in needs_attention {
                 md.push_str(&format!("### {}\n\n", repo.name));
-                md.push_str(&format!("- **路径**：`{}`\n", crate::utils::sanitize_path(&repo.path)));
-                md.push_str(&format!("- **分支**：`{}`\n", 
-                    repo.branch.as_deref().unwrap_or("无")));
-                
+                md.push_str(&format!(
+                    "- **路径**：`{}`\n",
+                    crate::utils::sanitize_path(&repo.path)
+                ));
+                md.push_str(&format!(
+                    "- **分支**：`{}`\n",
+                    repo.branch.as_deref().unwrap_or("无")
+                ));
+
                 if repo.freshness == Freshness::HasUpdates {
                     md.push_str(&format!("- **落后**：{} 个提交\n", repo.behind_count));
                 }
-                
+
                 if repo.dirty {
-                    md.push_str(&format!("- **本地修改**：{} 个文件\n", repo.dirty_files.len()));
+                    md.push_str(&format!(
+                        "- **本地修改**：{} 个文件\n",
+                        repo.dirty_files.len()
+                    ));
                     md.push_str("- **已修改文件**：\n");
                     for file in &repo.dirty_files {
                         md.push_str(&format!("  - `{}`\n", file));

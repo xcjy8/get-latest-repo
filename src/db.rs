@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::PathBuf;
 
 use crate::config::AppConfig;
@@ -24,9 +24,11 @@ impl Database {
             .with_context(|| format!("无法打开数据库: {}", path.display()))?;
 
         // Enable WAL mode for better concurrency performance
-        let _journal_mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+        let _journal_mode: String =
+            conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
         // Set busy timeout to avoid "database is locked" errors
-        let _old_timeout: i32 = conn.query_row("PRAGMA busy_timeout = 5000", [], |row| row.get(0))?;
+        let _old_timeout: i32 =
+            conn.query_row("PRAGMA busy_timeout = 5000", [], |row| row.get(0))?;
         // WAL mode optimization: synchronous = NORMAL for better performance
         conn.execute("PRAGMA synchronous = NORMAL", [])?;
 
@@ -41,7 +43,7 @@ impl Database {
 
         let db = Self { conn };
         db.init_tables()?;
-        
+
         Ok(db)
     }
 
@@ -49,8 +51,10 @@ impl Database {
 
     /// Initialize table schema and run migrations
     fn init_tables(&self) -> Result<()> {
-        let version: i32 = self.conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        
+        let version: i32 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+
         // Scan sources table
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS scan_sources (
@@ -122,9 +126,8 @@ impl Database {
             // Future schema migrations go here
             // e.g. ALTER TABLE ADD COLUMN ...
 
-            self.conn.execute_batch(
-                &format!("PRAGMA user_version = {};", Self::SCHEMA_VERSION),
-            )?;
+            self.conn
+                .execute_batch(&format!("PRAGMA user_version = {};", Self::SCHEMA_VERSION))?;
         }
 
         Ok(())
@@ -135,7 +138,7 @@ impl Database {
     /// Insert or update scan source
     pub fn upsert_scan_source(&self, source: &mut ScanSource) -> Result<()> {
         let ignore_patterns = source.ignore_patterns.join(",");
-        
+
         if let Some(id) = source.id {
             self.conn.execute(
                 "UPDATE scan_sources SET
@@ -178,15 +181,15 @@ impl Database {
                     source.last_scan_at
                 ],
             )?;
-            
+
             source.id = Some(self.conn.last_insert_rowid());
         }
-        
+
         Ok(())
     }
 
     /// Get all scan sources
-    /// 
+    ///
     /// Currently unused, reserved for future scan source management
     #[allow(dead_code)]
     pub fn list_scan_sources(&self) -> Result<Vec<ScanSource>> {
@@ -195,24 +198,28 @@ impl Database {
                     enabled, last_scan_at
              FROM scan_sources
              WHERE enabled = 1
-             ORDER BY root_path"
+             ORDER BY root_path",
         )?;
 
-        let sources = stmt.query_map([], |row| {
-            let ignore_str: String = row.get(3)?;
-            let ignore_patterns = ignore_str.split(',').map(|s| s.trim().to_string()).collect();
-            
-            Ok(ScanSource {
-                id: row.get(0)?,
-                root_path: row.get(1)?,
-                max_depth: row.get::<_, usize>(2)?,
-                ignore_patterns,
-                follow_symlinks: row.get::<_, i32>(4)? != 0,
-                enabled: row.get::<_, i32>(5)? != 0,
-                last_scan_at: row.get(6)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+        let sources = stmt
+            .query_map([], |row| {
+                let ignore_str: String = row.get(3)?;
+                let ignore_patterns = ignore_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect();
+
+                Ok(ScanSource {
+                    id: row.get(0)?,
+                    root_path: row.get(1)?,
+                    max_depth: row.get::<_, usize>(2)?,
+                    ignore_patterns,
+                    follow_symlinks: row.get::<_, i32>(4)? != 0,
+                    enabled: row.get::<_, i32>(5)? != 0,
+                    last_scan_at: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(sources)
     }
@@ -220,10 +227,8 @@ impl Database {
     /// Delete scan source
     #[allow(dead_code)]
     pub fn delete_scan_source(&self, id: i64) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM scan_sources WHERE id = ?1",
-            params![id],
-        )?;
+        self.conn
+            .execute("DELETE FROM scan_sources WHERE id = ?1", params![id])?;
         Ok(())
     }
 
@@ -269,7 +274,8 @@ impl Database {
         updated_at = CURRENT_TIMESTAMP";
 
     fn build_repo_params(repo: &Repository) -> (String, &str) {
-        let dirty_files = serde_json::to_string(&repo.dirty_files).unwrap_or_else(|_| "[]".to_string());
+        let dirty_files =
+            serde_json::to_string(&repo.dirty_files).unwrap_or_else(|_| "[]".to_string());
         let freshness_str = repo.freshness.as_str();
         (dirty_files, freshness_str)
     }
@@ -281,11 +287,24 @@ impl Database {
         self.conn.execute(
             Self::UPSERT_REPO_SQL,
             params![
-                repo.path, repo.root_path, repo.name, repo.depth, repo.branch,
-                repo.dirty as i32, dirty_files, repo.upstream_ref, repo.upstream_url,
-                repo.ahead_count, repo.behind_count, freshness_str,
-                repo.last_commit_at, repo.last_commit_message, repo.last_commit_author,
-                repo.last_scanned_at, repo.last_fetch_at, repo.last_pull_at,
+                repo.path,
+                repo.root_path,
+                repo.name,
+                repo.depth,
+                repo.branch,
+                repo.dirty as i32,
+                dirty_files,
+                repo.upstream_ref,
+                repo.upstream_url,
+                repo.ahead_count,
+                repo.behind_count,
+                freshness_str,
+                repo.last_commit_at,
+                repo.last_commit_message,
+                repo.last_commit_author,
+                repo.last_scanned_at,
+                repo.last_fetch_at,
+                repo.last_pull_at,
             ],
         )?;
 
@@ -303,10 +322,12 @@ impl Database {
                     upstream_ref, upstream_url, ahead_count, behind_count, freshness,
                     last_commit_at, last_commit_message, last_commit_author,
                     last_scanned_at, last_fetch_at, last_pull_at
-             FROM repositories WHERE path = ?1"
+             FROM repositories WHERE path = ?1",
         )?;
 
-        let repo = stmt.query_row(params![path], Self::row_to_repository).optional()?;
+        let repo = stmt
+            .query_row(params![path], Self::row_to_repository)
+            .optional()?;
         Ok(repo)
     }
 
@@ -318,10 +339,11 @@ impl Database {
                     last_commit_at, last_commit_message, last_commit_author,
                     last_scanned_at, last_fetch_at, last_pull_at
              FROM repositories
-             ORDER BY last_commit_at DESC NULLS LAST, updated_at DESC"
+             ORDER BY last_commit_at DESC NULLS LAST, updated_at DESC",
         )?;
 
-        let repos = stmt.query_map([], Self::row_to_repository)?
+        let repos = stmt
+            .query_map([], Self::row_to_repository)?
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(repos)
@@ -348,7 +370,7 @@ impl Database {
     }
 
     /// Delete repositories under the specified root path (cleanup deleted repos)
-    /// 
+    ///
     /// Currently unused, reserved for future bulk cleanup functionality
     #[allow(dead_code)]
     pub fn delete_repositories_by_root(&self, root_path: &str) -> Result<usize> {
@@ -361,10 +383,8 @@ impl Database {
 
     /// Delete repository at specified path
     pub fn delete_repository(&self, path: &str) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM repositories WHERE path = ?1",
-            params![path],
-        )?;
+        self.conn
+            .execute("DELETE FROM repositories WHERE path = ?1", params![path])?;
         Ok(())
     }
 
@@ -381,27 +401,40 @@ impl Database {
             &self.conn,
             rusqlite::TransactionBehavior::Immediate,
         )?;
-        
+
         // Delete old record
         tx.execute(
             "DELETE FROM repositories WHERE path = ?1",
             params![old_path],
         )?;
-        
+
         // Insert new record
         let (dirty_files, freshness_str) = Self::build_repo_params(repo);
-        
+
         tx.execute(
             Self::UPSERT_REPO_SQL,
             params![
-                repo.path, repo.root_path, repo.name, repo.depth, repo.branch,
-                repo.dirty as i32, dirty_files, repo.upstream_ref, repo.upstream_url,
-                repo.ahead_count, repo.behind_count, freshness_str,
-                repo.last_commit_at, repo.last_commit_message, repo.last_commit_author,
-                repo.last_scanned_at, repo.last_fetch_at, repo.last_pull_at,
+                repo.path,
+                repo.root_path,
+                repo.name,
+                repo.depth,
+                repo.branch,
+                repo.dirty as i32,
+                dirty_files,
+                repo.upstream_ref,
+                repo.upstream_url,
+                repo.ahead_count,
+                repo.behind_count,
+                freshness_str,
+                repo.last_commit_at,
+                repo.last_commit_message,
+                repo.last_commit_author,
+                repo.last_scanned_at,
+                repo.last_fetch_at,
+                repo.last_pull_at,
             ],
         )?;
-        
+
         tx.commit()?;
         Ok(())
     }

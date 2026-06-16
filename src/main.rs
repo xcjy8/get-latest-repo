@@ -12,6 +12,7 @@ mod scanner;
 mod security;
 mod signal_handler;
 mod sync;
+mod tui;
 mod utils;
 mod workflow;
 
@@ -236,6 +237,11 @@ async fn main() -> Result<std::process::ExitCode> {
         Commands::Status { path, diff, issues } => commands::status::execute(path, diff, issues)
             .await
             .map(|_| 0),
+        Commands::Tui => {
+            commands::tui::execute(no_security_check, auto_skip_high_risk, proxy_config)
+                .await
+                .map(|_| 0)
+        }
         Commands::Config { command } => commands::config::execute(command).await.map(|_| 0),
         Commands::Workflow {
             name,

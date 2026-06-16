@@ -18,28 +18,26 @@ pub const CONCURRENT_OVERALL_TIMEOUT_SECS: u64 = 120;
 /// Per-recv timeout for concurrent execution (seconds)
 pub const CONCURRENT_RECV_TIMEOUT_SECS: u64 = 30;
 
-/// Max file size for security scan (1MB)
-pub const SECURITY_MAX_FILE_SIZE: usize = 1024 * 1024;
-
 /// Sanitize URL, remove credential info
 ///
 /// Convert `https://token@github.com/user/repo.git` to `https://github.com/user/repo.git`
 pub fn sanitize_url(url: &str) -> String {
     // Parse URL, remove user info part
     if let Ok(parsed) = url::Url::parse(url)
-        && (parsed.username() != "" || parsed.password().is_some()) {
-            // Rebuild URL without credentials
-            let mut cleaned = parsed.clone();
-            cleaned.set_username("").ok();
-            cleaned.set_password(None).ok();
-            return cleaned.to_string();
-        }
+        && (parsed.username() != "" || parsed.password().is_some())
+    {
+        // Rebuild URL without credentials
+        let mut cleaned = parsed.clone();
+        cleaned.set_username("").ok();
+        cleaned.set_password(None).ok();
+        return cleaned.to_string();
+    }
     // If parsing fails, return original URL (may be local path or other format)
     url.to_string()
 }
 
 /// Sanitize path, only show last two directory levels
-/// 
+///
 /// Examples:
 /// - `/home/user/projects/myrepo` -> `.../projects/myrepo`
 /// - `/Users/sy/spgit/myrepo` -> `.../spgit/myrepo`
@@ -47,7 +45,7 @@ pub fn sanitize_url(url: &str) -> String {
 pub fn sanitize_path(path: &str) -> String {
     let path = Path::new(path);
     let components: Vec<_> = path.components().collect();
-    
+
     if components.len() <= 2 {
         // Path is short, return directly
         path.to_string_lossy().to_string()
@@ -58,7 +56,8 @@ pub fn sanitize_path(path: &str) -> String {
         if last_two.len() < 2 {
             path.to_string_lossy().to_string()
         } else {
-            format!(".../{}/{}", 
+            format!(
+                ".../{}/{}",
                 last_two[0].as_os_str().to_string_lossy(),
                 last_two[1].as_os_str().to_string_lossy()
             )
@@ -112,10 +111,7 @@ mod tests {
             sanitize_path("/home/user/projects/myrepo"),
             ".../projects/myrepo"
         );
-        assert_eq!(
-            sanitize_path("/Users/sy/spgit/myrepo"),
-            ".../spgit/myrepo"
-        );
+        assert_eq!(sanitize_path("/Users/sy/spgit/myrepo"), ".../spgit/myrepo");
     }
 
     #[test]
@@ -146,8 +142,14 @@ mod tests {
 
     #[test]
     fn test_should_ignore_entry_exact() {
-        assert!(should_ignore_entry("node_modules", &["node_modules".to_string()]));
-        assert!(!should_ignore_entry("my_node_modules", &["node_modules".to_string()]));
+        assert!(should_ignore_entry(
+            "node_modules",
+            &["node_modules".to_string()]
+        ));
+        assert!(!should_ignore_entry(
+            "my_node_modules",
+            &["node_modules".to_string()]
+        ));
     }
 
     #[test]
@@ -165,6 +167,9 @@ mod tests {
 
     #[test]
     fn test_should_ignore_entry_no_match() {
-        assert!(!should_ignore_entry("src", &["node_modules".to_string(), "target*".to_string()]));
+        assert!(!should_ignore_entry(
+            "src",
+            &["node_modules".to_string(), "target*".to_string()]
+        ));
     }
 }

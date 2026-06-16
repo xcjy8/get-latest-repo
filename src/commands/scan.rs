@@ -11,8 +11,8 @@ use crate::commands::ensure_initialized;
 use crate::fetcher::Fetcher;
 use crate::models::RepoSummary;
 use crate::reporter::{
-    html::HtmlReporter, markdown::MarkdownReporter, save_report_async, terminal::TerminalReporter,
-    terminal::print_scan_summary, Reporter,
+    Reporter, html::HtmlReporter, markdown::MarkdownReporter, save_report_async,
+    terminal::TerminalReporter, terminal::print_scan_summary,
 };
 use crate::scanner::Scanner;
 

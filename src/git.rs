@@ -616,7 +616,7 @@ impl GitOps {
 /// Pull force execution results
 #[derive(Debug, Clone)]
 pub enum PullForceOutcome {
-    /// Success (clean repository directly pulled, or dirty repository stash-pull-pop succeeded)
+    /// Success (operation completed; callers decide whether stash is restored or kept)
     Success,
     /// Stash pop conflict (pull succeeded, but pop failed)
     Conflict {
@@ -1040,12 +1040,13 @@ impl GitOps {
         result
     }
 
-    /// 备份同步：归档 → 必要时 stash → 硬重置到远程 → 恢复 stash。
+    /// 备份同步：归档 → 必要时 stash 保护本地修改 → 硬重置到远程。
     ///
     /// 这个流程面向“本地只做镜像备份”的仓库：用户不在本地维护业务修改，
     /// 只希望本地副本尽量严格匹配远程。它会自动处理两类常见风险：
     /// - 远程历史被改写（force push / rebase）：先把旧 HEAD 归档到 refs。
-    /// - 本地存在未提交变更：先 stash，再 reset，最后尝试 stash pop。
+    /// - 本地存在未提交变更：先 stash 作为恢复点，再 reset；不会自动 pop，
+    ///   否则工作区会重新变 dirty，无法满足“备份副本严格匹配远程”的语义。
     ///
     /// 返回 `(PullForceOutcome, Option<archive_ref_name>)`。当远程历史改写会丢弃
     /// 本地 HEAD 时，`archive_ref_name` 会指向 `refs/glr-archive/history/<branch>/<timestamp>`，
@@ -1062,10 +1063,16 @@ impl GitOps {
         // 0. 如果硬重置会丢失本地历史，先创建归档引用。
         let archive_ref = Self::maybe_archive_before_reset(&mut repo, &branch_name)?;
 
-        // 1. 只在普通 dirty 状态下保存本地变更；未合并索引无法创建 stash tree，
-        //    对备份模式来说应直接进入硬重置恢复路径。
+        // 1. 先保护子模块内部的本地修改。父仓库的 stash/reset 只能处理 gitlink
+        //    指针，不能保存子模块自己的工作区；如果这里不单独处理，像
+        //    `cmux/ghostty` 这种子模块 dirty 会在父仓库 reset 后继续显示为脏。
+        Self::stash_dirty_submodules_for_backup(path)?;
+
+        // 2. 只在普通 dirty 状态下保存父仓库本地变更；未合并索引无法创建
+        //    stash tree，对备份模式来说应直接进入硬重置恢复路径。
         let (is_dirty, _) = Self::check_dirty(&repo)?;
         let has_unmerged_index = Self::has_unmerged_index(&repo);
+        let mut needs_no_symlink_reset = false;
         let stash_name = if is_dirty && !has_unmerged_index {
             let name = format!(
                 "getlatestrepo-backup-{}",
@@ -1078,6 +1085,11 @@ impl GitOps {
                     eprintln!("   ℹ️ 检测到 dirty 状态但没有可 stash 的内容，继续执行备份同步。");
                     None
                 }
+                Err(e) if Self::is_symlink_filename_too_long_error(&e) => {
+                    Self::stash_with_native_git_no_symlinks(path, &name)?;
+                    needs_no_symlink_reset = true;
+                    Some(name)
+                }
                 Err(e) => return Err(e.into()),
             }
         } else {
@@ -1087,7 +1099,7 @@ impl GitOps {
             None
         };
 
-        // 2. 硬重置到远程跟踪分支；这一步负责处理普通落后和分叉历史。
+        // 3. 硬重置到远程跟踪分支；这一步负责处理普通落后和分叉历史。
         let reset_result = (|| -> Result<()> {
             let remote_name = Self::get_remote_name(&repo)?.unwrap_or_else(|| "origin".to_string());
             let remote_ref_name = format!("refs/remotes/{}/{}", remote_name, branch_name);
@@ -1099,33 +1111,25 @@ impl GitOps {
                 .target()
                 .ok_or_else(|| GetLatestRepoError::RemoteBranchNoTarget)?;
 
-            Self::reset_hard_to_remote(&repo, path, &remote_ref_name, remote_oid)?;
+            if needs_no_symlink_reset {
+                Self::reset_hard_with_native_git_no_symlinks(path, &remote_ref_name)?;
+            } else {
+                Self::reset_hard_to_remote(&repo, path, &remote_ref_name, remote_oid)?;
+            }
+            Self::force_update_submodules_for_backup(path)?;
 
             Ok(())
         })();
 
         match reset_result {
             Ok(()) => {
-                // 3. 如果第 1 步创建了 stash，尝试恢复；冲突会被显式返回给上层展示。
+                // 4. 备份模式不自动恢复 stash。stash 的作用是给用户保留本地改动
+                //    的手动恢复点；自动 pop 会把 dirty 状态重新带回工作区，导致
+                //    “hard reset 到远程”名不副实。
                 if let Some(stash_name) = stash_name {
-                    match repo.stash_pop(0, None) {
-                        Ok(()) => Ok((PullForceOutcome::Success, archive_ref)),
-                        Err(_) => {
-                            let conflict_files = Self::get_conflict_files(&mut repo);
-                            let stash_index = Self::find_stash_index(&mut repo, &stash_name);
-                            Ok((
-                                PullForceOutcome::Conflict {
-                                    stash_name,
-                                    conflict_files,
-                                    stash_index,
-                                },
-                                archive_ref,
-                            ))
-                        }
-                    }
-                } else {
-                    Ok((PullForceOutcome::Success, archive_ref))
+                    eprintln!("   📦 本地修改已保存到 stash: {}", stash_name);
                 }
+                Ok((PullForceOutcome::Success, archive_ref))
             }
             Err(e) => {
                 if stash_name.is_some() {
@@ -1134,6 +1138,56 @@ impl GitOps {
                 Err(e)
             }
         }
+    }
+
+    /// 在备份模式重置父仓库前，先保存所有子模块自己的本地修改。
+    ///
+    /// Git 子模块是独立仓库：父仓库只能看到 gitlink 是否变化，不能通过父仓库
+    /// stash 保存子模块内部文件。这里使用原生 `git submodule foreach`，逐个子模块
+    /// 检查 `status --porcelain`，只有确实有变更时才创建包含未跟踪文件的 stash。
+    /// 子模块没有变更或仓库没有子模块时命令是空操作，不影响普通仓库。
+    fn stash_dirty_submodules_for_backup(path: &Path) -> Result<()> {
+        Self::run_native_git(
+            path,
+            &[
+                "submodule",
+                "foreach",
+                "--recursive",
+                r#"if [ -n "$(git status --porcelain --untracked-files=all)" ]; then git stash push -u -m "getlatestrepo: submodule backup before pull-backup"; fi"#,
+            ],
+            "保存子模块本地修改",
+        )
+        .map(|_| ())
+    }
+
+    /// 把子模块强制同步到父仓库当前提交记录的 gitlink。
+    ///
+    /// `repo.reset(..., Hard)` 只重置父仓库索引和工作区，不会递归进入子模块。
+    /// 因此备份模式在父仓库 reset 成功后还要强制 `submodule update`，再对每个
+    /// 子模块执行 `reset --hard && clean -fd`，保证父仓库 `status` 不再因为子模块
+    /// 内部工作区残留而继续显示 dirty。
+    fn force_update_submodules_for_backup(path: &Path) -> Result<()> {
+        Self::run_native_git(
+            path,
+            &["submodule", "sync", "--recursive"],
+            "同步子模块 URL",
+        )?;
+        Self::run_native_git(
+            path,
+            &["submodule", "update", "--init", "--recursive", "--force"],
+            "强制更新子模块",
+        )?;
+        Self::run_native_git(
+            path,
+            &[
+                "submodule",
+                "foreach",
+                "--recursive",
+                "git reset --hard && git clean -fd",
+            ],
+            "清理子模块工作区",
+        )
+        .map(|_| ())
     }
 
     /// 判断 stash 失败是否只是“没有可保存内容”。
@@ -1190,30 +1244,92 @@ impl GitOps {
     /// 因此只在明确识别出超长 symlink 错误后调用原生 git。该命令只修改目标
     /// 仓库工作区，不触碰远程，也不会修改本项目仓库历史。
     fn reset_hard_with_native_git_no_symlinks(path: &Path, remote_ref_name: &str) -> Result<()> {
-        let output = std::process::Command::new("git")
-            .arg("-C")
-            .arg(path)
-            .args([
+        Self::persist_core_symlinks_false(path)?;
+        Self::run_native_git(
+            path,
+            &[
                 "-c",
                 "core.symlinks=false",
                 "reset",
                 "--hard",
                 remote_ref_name,
-            ])
+            ],
+            "禁用 symlink 的原生 git 回退重置",
+        )
+        .map(|_| ())
+    }
+
+    /// 使用原生 git 在禁用 symlink 检出的模式下创建 stash。
+    ///
+    /// 有些仓库把普通长文本错误提交成 symlink blob。libgit2 的 `stash_save`
+    /// 会按 symlink 检出恢复工作区，从而因为 target 过长失败；原生 git 可以通过
+    /// `core.symlinks=false` 把这类 symlink blob 写成普通文件，先完成 stash，
+    /// 后续 hard reset fallback 也会使用相同策略恢复工作区。
+    fn stash_with_native_git_no_symlinks(path: &Path, stash_name: &str) -> Result<()> {
+        Self::persist_core_symlinks_false(path)?;
+        Self::run_native_git(
+            path,
+            &[
+                "-c",
+                "core.symlinks=false",
+                "stash",
+                "push",
+                "-u",
+                "-m",
+                stash_name,
+            ],
+            "禁用 symlink 的原生 git stash",
+        )
+        .map(|_| ())
+    }
+
+    /// 持久设置目标仓库 `core.symlinks=false`。
+    ///
+    /// 这不是全局配置，只写入当前仓库 `.git/config`。对于包含超长 symlink blob 的
+    /// 仓库，临时 `git -c core.symlinks=false` 能完成 checkout，但后续 status 仍会按
+    /// 默认 symlink 语义判断 typechange；持久配置后，Git/libgit2 才会把普通文件形态
+    /// 视为该仓库在当前文件系统上的稳定镜像状态。
+    fn persist_core_symlinks_false(path: &Path) -> Result<()> {
+        Self::run_native_git(
+            path,
+            &["config", "core.symlinks", "false"],
+            "写入 core.symlinks=false",
+        )
+        .map(|_| ())
+    }
+
+    /// 执行只作用于目标仓库工作区的原生 git 命令。
+    ///
+    /// 这里集中处理启动失败、退出码、stderr 截断和非交互环境变量，避免多个
+    /// fallback 路径各自拼错误信息。调用者传入的命令不得修改远程仓库或本项目
+    /// 历史，只用于目标备份仓库的工作区恢复。
+    fn run_native_git(path: &Path, args: &[&str], action: &str) -> Result<String> {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
             .env("GIT_TERMINAL_PROMPT", "0")
             .output()
             .map_err(|e| {
-                GetLatestRepoError::Other(anyhow::anyhow!("无法启动原生 git 回退重置: {}", e))
+                GetLatestRepoError::Other(anyhow::anyhow!("无法启动原生 git 执行{}: {}", action, e))
             })?;
 
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
         if output.status.success() {
-            return Ok(());
+            return Ok(format!("{}{}", stdout, stderr));
         }
 
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(GetLatestRepoError::Other(anyhow::anyhow!(
-            "硬重置到远程分支失败，且禁用 symlink 的原生 git 回退也失败: {}",
+        let detail = if stderr.trim().is_empty() {
+            stdout.trim()
+        } else {
             stderr.trim()
+        };
+        Err(GetLatestRepoError::Other(anyhow::anyhow!(
+            "{}失败: {}",
+            action,
+            detail
         )))
     }
 
@@ -1660,6 +1776,49 @@ mod tests {
         .unwrap();
     }
 
+    fn run_git_for_test(args: &[&str], cwd: Option<&std::path::Path>) -> String {
+        run_git_for_test_with_stdin(args, cwd, None)
+    }
+
+    fn run_git_for_test_with_stdin(
+        args: &[&str],
+        cwd: Option<&std::path::Path>,
+        stdin: Option<&[u8]>,
+    ) -> String {
+        let mut command = std::process::Command::new("git");
+        command.args(args);
+        if let Some(cwd) = cwd {
+            command.current_dir(cwd);
+        }
+
+        command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if stdin.is_some() {
+            command.stdin(std::process::Stdio::piped());
+        }
+        let mut child = command.spawn().expect("spawn git command");
+        if let Some(input) = stdin {
+            use std::io::Write;
+            child
+                .stdin
+                .as_mut()
+                .expect("git stdin should be piped")
+                .write_all(input)
+                .expect("write git stdin");
+        }
+        let output = child.wait_with_output().expect("wait git command");
+        assert!(
+            output.status.success(),
+            "git {:?} failed\nstdout:\n{}\nstderr:\n{}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
     #[test]
     fn test_pull_ff_only_behind_remote_succeeds() {
         let (_tmp, path, c1) = create_repo_with_tracking();
@@ -2096,6 +2255,180 @@ mod tests {
             archives.is_empty(),
             "Should have no archive refs when up to date"
         );
+    }
+
+    #[test]
+    fn test_pull_backup_cleans_dirty_up_to_date_repo() {
+        let (_tmp, path, c1) = create_repo_with_tracking();
+        let repo = git2::Repository::open(&path).unwrap();
+        let sig = git2::Signature::now("test", "test@test.com").unwrap();
+        std::fs::write(path.join("tracked.txt"), "remote tracked\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new("tracked.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let parent = repo.find_commit(c1).unwrap();
+        let c2 = repo
+            .commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                "add tracked file",
+                &tree,
+                &[&parent],
+            )
+            .unwrap();
+        move_tracking_ref(&path, c2);
+
+        std::fs::write(path.join("tracked.txt"), "local dirty change\n").unwrap();
+        std::fs::write(path.join("untracked.txt"), "local untracked\n").unwrap();
+
+        let result = GitOps::pull_backup(&path);
+        assert!(
+            result.is_ok(),
+            "Expected dirty up-to-date backup repo to reset successfully, got: {:?}",
+            result
+        );
+
+        let repo = git2::Repository::open(&path).unwrap();
+        let (is_dirty, dirty_files) = GitOps::check_dirty(&repo).unwrap();
+        assert!(
+            !is_dirty,
+            "pull-backup should clean dirty files, remaining: {:?}",
+            dirty_files
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("tracked.txt")).unwrap(),
+            "remote tracked\n"
+        );
+        assert!(
+            !path.join("untracked.txt").exists(),
+            "untracked backup-only file should be removed after hard reset"
+        );
+    }
+
+    #[test]
+    fn test_pull_backup_cleans_dirty_submodule() {
+        let (_tmp, path, c1) = create_repo_with_tracking();
+        let submodule_tmp = TempDir::new().unwrap();
+        let submodule_path = submodule_tmp.path();
+
+        run_git_for_test(&["init"], Some(submodule_path));
+        run_git_for_test(&["config", "user.name", "test"], Some(submodule_path));
+        run_git_for_test(
+            &["config", "user.email", "test@test.com"],
+            Some(submodule_path),
+        );
+        std::fs::write(submodule_path.join("nested.txt"), "remote nested\n").unwrap();
+        run_git_for_test(&["add", "nested.txt"], Some(submodule_path));
+        run_git_for_test(&["commit", "-m", "submodule c1"], Some(submodule_path));
+
+        run_git_for_test(
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                submodule_path.to_str().unwrap(),
+                "deps/sub",
+            ],
+            Some(&path),
+        );
+
+        let repo = git2::Repository::open(&path).unwrap();
+        let sig = git2::Signature::now("test", "test@test.com").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new(".gitmodules")).unwrap();
+        index.add_path(std::path::Path::new("deps/sub")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let parent = repo.find_commit(c1).unwrap();
+        let c2 = repo
+            .commit(Some("HEAD"), &sig, &sig, "add submodule", &tree, &[&parent])
+            .unwrap();
+        move_tracking_ref(&path, c2);
+        drop(parent);
+        drop(tree);
+        drop(repo);
+
+        let checked_out_submodule = path.join("deps/sub");
+        std::fs::write(
+            checked_out_submodule.join("nested.txt"),
+            "local dirty nested\n",
+        )
+        .unwrap();
+
+        let result = GitOps::pull_backup(&path);
+        assert!(
+            result.is_ok(),
+            "Expected dirty submodule backup repo to reset successfully, got: {:?}",
+            result
+        );
+
+        let repo = git2::Repository::open(&path).unwrap();
+        let (is_dirty, dirty_files) = GitOps::check_dirty(&repo).unwrap();
+        assert!(
+            !is_dirty,
+            "pull-backup should clean dirty submodule status, remaining: {:?}",
+            dirty_files
+        );
+        assert_eq!(
+            std::fs::read_to_string(checked_out_submodule.join("nested.txt")).unwrap(),
+            "remote nested\n"
+        );
+    }
+
+    #[test]
+    fn test_pull_backup_handles_deleted_oversized_symlink_blob() {
+        let (_tmp, path, c1) = create_repo_with_tracking();
+        let long_target = "a".repeat(4096);
+        let blob_id = run_git_for_test_with_stdin(
+            &["hash-object", "-w", "--stdin"],
+            Some(&path),
+            Some(long_target.as_bytes()),
+        );
+
+        run_git_for_test(
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("120000,{blob_id},skills/last30days/SKILL.md"),
+            ],
+            Some(&path),
+        );
+        let c2 = add_commit(&path, "add oversized symlink blob");
+        move_tracking_ref(&path, c2);
+
+        run_git_for_test(
+            &["-c", "core.symlinks=false", "reset", "--hard", "HEAD"],
+            Some(&path),
+        );
+        std::fs::remove_file(path.join("skills/last30days/SKILL.md")).unwrap();
+
+        let result = GitOps::pull_backup(&path);
+        assert!(
+            result.is_ok(),
+            "Expected oversized symlink fallback to reset successfully, got: {:?}",
+            result
+        );
+
+        let repo = git2::Repository::open(&path).unwrap();
+        let (is_dirty, dirty_files) = GitOps::check_dirty(&repo).unwrap();
+        assert!(
+            !is_dirty,
+            "oversized symlink fallback should leave repo clean, remaining: {:?}",
+            dirty_files
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("skills/last30days/SKILL.md")).unwrap(),
+            long_target
+        );
+        let head_oid = repo.head().unwrap().target().unwrap();
+        assert_eq!(head_oid, c2);
+        assert_ne!(head_oid, c1);
     }
 
     #[test]

@@ -61,7 +61,11 @@ pub async fn execute(
             fetcher = fetcher.with_proxy(proxy.clone());
             println!("{} 使用代理：{}", "ℹ".blue(), proxy.http_proxy);
         } else {
-            println!("{} 已配置代理但未启用：{}（使用 --proxy 启用）", "ℹ".blue(), proxy.http_proxy);
+            println!(
+                "{} 已配置代理但未启用：{}（使用 --proxy 启用）",
+                "ℹ".blue(),
+                proxy.http_proxy
+            );
         }
     }
 

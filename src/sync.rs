@@ -24,9 +24,7 @@ use crate::scanner::Scanner;
 #[derive(Debug, Clone, PartialEq)]
 pub enum SyncStatus {
     /// Synced, no action needed
-    InSync {
-        count: usize,
-    },
+    InSync { count: usize },
     /// New repositories found
     NewReposFound {
         disk_count: usize,
@@ -41,10 +39,7 @@ pub enum SyncStatus {
     },
     /// Both added and removed
     #[allow(dead_code)]
-    Diverged {
-        disk_count: usize,
-        db_count: usize,
-    },
+    Diverged { disk_count: usize, db_count: usize },
 }
 
 impl SyncStatus {
@@ -105,11 +100,7 @@ impl RepoSync {
     /// # Returns
     /// - `Ok(SyncStatus)`: Sync status
     /// - `Err`: Traversal or database error
-    pub fn check_sync_status(
-        &self,
-        sources: &[ScanSource],
-        db: &Database,
-    ) -> Result<SyncStatus> {
+    pub fn check_sync_status(&self, sources: &[ScanSource], db: &Database) -> Result<SyncStatus> {
         // Quickly count repositories on disk
         let disk_count = self.quick_count_git_dirs(sources)?;
 
@@ -172,7 +163,13 @@ impl RepoSync {
             }
 
             // Execute full scan
-            Scanner::scan_all(sources, db, progress, crate::utils::DEFAULT_MAX_CONCURRENT_SCAN).await?;
+            Scanner::scan_all(
+                sources,
+                db,
+                progress,
+                crate::utils::DEFAULT_MAX_CONCURRENT_SCAN,
+            )
+            .await?;
 
             // Recheck to confirm synced
             let final_status = self.check_sync_status(sources, db)?;
@@ -400,7 +397,10 @@ mod tests {
         };
 
         assert!(status.needs_scan());
-        assert_eq!(status.description(), "发现 5 个新增仓库（磁盘: 15，数据库: 10）");
+        assert_eq!(
+            status.description(),
+            "发现 5 个新增仓库（磁盘: 15，数据库: 10）"
+        );
     }
 
     #[test]

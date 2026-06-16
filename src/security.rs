@@ -1,69 +1,55 @@
 use anyhow::Result;
 use colored::Colorize;
 use git2::{Oid, Repository};
-use std::sync::LazyLock;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::LazyLock;
 
 /// Pre-compiled sensitive file patterns (global cache)
 static SENSITIVE_PATTERNS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     [
-        ".gitignore", ".gitmodules", "Cargo.toml", "package.json",
-        "requirements.txt", "setup.py", "Makefile", "Dockerfile",
-        ".github/workflows", ".gitlab-ci.yml", "build.gradle", "pom.xml", "go.mod",
+        ".gitignore",
+        ".gitmodules",
+        "Cargo.toml",
+        "package.json",
+        "requirements.txt",
+        "setup.py",
+        "Makefile",
+        "Dockerfile",
+        ".github/workflows",
+        ".gitlab-ci.yml",
+        "build.gradle",
+        "pom.xml",
+        "go.mod",
         // Added: credential and key files
-        ".env", ".env.local", ".env.production", ".env.development",
-        "*.pem", "*.key", "id_rsa", "id_rsa.pub", "id_ed25519", "id_ed25519.pub",
-        ".aws/credentials", ".docker/config.json", "kubeconfig", "*.p12", "*.pfx",
+        ".env",
+        ".env.local",
+        ".env.production",
+        ".env.development",
+        "*.pem",
+        "*.key",
+        "id_rsa",
+        "id_rsa.pub",
+        "id_ed25519",
+        "id_ed25519.pub",
+        ".aws/credentials",
+        ".docker/config.json",
+        "kubeconfig",
+        "*.p12",
+        "*.pfx",
         // Added: CI config files (high risk for supply chain attacks)
-        "Jenkinsfile", ".circleci/config.yml", ".travis.yml", "azure-pipelines.yml",
+        "Jenkinsfile",
+        ".circleci/config.yml",
+        ".travis.yml",
+        "azure-pipelines.yml",
     ]
     .iter()
     .cloned()
     .collect()
-});
-
-/// Pre-compiled code file extensions (global cache)
-static CODE_EXTENSIONS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    [
-        "rs", "py", "js", "ts", "java", "go", "c", "cpp", "h", "hpp",
-        "rb", "php", "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd",
-        "pl", "pm", "t", "swift", "kt", "scala", "groovy", "gradle",
-        "xml", "json", "yaml", "yml", "toml", "ini", "cfg", "conf",
-    ]
-    .iter()
-    .cloned()
-    .collect()
-});
-
-/// Pre-compiled suspicious code patterns (global cache, avoid repeated compilation)
-static SUSPICIOUS_PATTERNS: LazyLock<Vec<(regex::Regex, &'static str)>> = LazyLock::new(|| {
-    // 使用有限量词（如 {0,200}）替代 .* / \s*，显著降低 ReDoS 回溯风险
-    let raw: &[(&str, &str)] = &[
-        (r"eval\s{0,20}\(", "eval 函数调用"),
-        (r"exec\s{0,20}\(", "exec 函数调用"),
-        (r"system\s{0,20}\(", "system 函数调用"),
-        (r"os\.system", "os.system 调用"),
-        (r"subprocess\.call", "subprocess 调用"),
-        (r"Runtime\.getRuntime\(\)\.exec", "Java Runtime exec 调用"),
-        (r"child_process", "Node.js child_process 调用"),
-        (r"\bbase64\b.{0,200}\bdecode\b", "Base64 解码（可能隐藏恶意代码）"),
-        (r"http://[^\s]{0,200}\.onion", "暗网地址"),
-        (r"wget\s+http", "wget 下载"),
-        (r"curl\s+\S{0,200}\|\S{0,200}sh", "curl 管道执行 shell"),
-        (r"fetch\([^)]{0,200}\.txt\)[^)]{0,200}eval", "fetch 文本后执行 eval"),
-        (r"document\.write.{0,200}unescape", "document.write + unescape"),
-        (r"fromCharCode", "String.fromCharCode（可能用于混淆）"),
-    ];
-    raw.iter()
-        .filter_map(|(pat, desc)| {
-            regex::Regex::new(pat).ok().map(|re| (re, *desc))
-        })
-        .collect()
 });
 
 /// SecurityRisk level
-/// 
+///
 /// Note: some levels are currently unused, reserved for future extension
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -120,7 +106,7 @@ pub struct SecurityRisk {
 }
 
 /// Risk type
-/// 
+///
 /// Note: some types currently unused, reserved for future safety detection extension
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -131,8 +117,6 @@ pub enum RiskType {
     FileCountAnomaly,
     /// Sensitive file changes
     SensitiveFileModified,
-    /// Suspicious code pattern
-    SuspiciousCodePattern,
     /// Committer anomaly
     CommitterAnomaly,
     /// Signature verification failed - currently unused, reserved for future GPG verification
@@ -155,7 +139,7 @@ pub struct SecurityScanner;
 
 impl SecurityScanner {
     /// Execute security scan
-    /// 
+    ///
     /// Called before fetch/pull, detects safety of remote changes
     pub fn scan_before_fetch(
         path: &Path,
@@ -172,30 +156,28 @@ impl SecurityScanner {
         if let (Some(local), Some(remote)) = (local_oid, remote_oid) {
             // Check file count changes
             if let Ok(risk) = Self::check_file_count_anomaly(&repo, local, remote)
-                && risk.level != RiskLevel::Safe {
-                    risks.push(risk);
-                }
+                && risk.level != RiskLevel::Safe
+            {
+                risks.push(risk);
+            }
 
             // Check sensitive file changes
             if let Ok(risk) = Self::check_sensitive_files(&repo, local, remote)
-                && risk.level != RiskLevel::Safe {
-                    risks.push(risk);
-                }
-
-            // Check suspicious code patterns
-            if let Ok(risk) = Self::check_suspicious_patterns(&repo, local, remote)
-                && risk.level != RiskLevel::Safe {
-                    risks.push(risk);
-                }
+                && risk.level != RiskLevel::Safe
+            {
+                risks.push(risk);
+            }
 
             // Check committer anomalies
             if let Ok(risk) = Self::check_committer_anomaly(&repo, local, remote)
-                && risk.level != RiskLevel::Safe {
-                    risks.push(risk);
-                }
+                && risk.level != RiskLevel::Safe
+            {
+                risks.push(risk);
+            }
         }
 
-        let max_level = risks.iter()
+        let max_level = risks
+            .iter()
             .map(|r| r.level)
             .max_by_key(|l| match l {
                 RiskLevel::Critical => 4,
@@ -214,7 +196,11 @@ impl SecurityScanner {
     }
 
     /// Detect file count anomaly
-    fn check_file_count_anomaly(repo: &Repository, local: Oid, remote: Oid) -> Result<SecurityRisk> {
+    fn check_file_count_anomaly(
+        repo: &Repository,
+        local: Oid,
+        remote: Oid,
+    ) -> Result<SecurityRisk> {
         let local_tree = repo.find_commit(local)?.tree()?;
         let remote_tree = repo.find_commit(remote)?.tree()?;
 
@@ -239,7 +225,9 @@ impl SecurityScanner {
                 risk_type: RiskType::FileCountAnomaly,
                 description: format!(
                     "文件数量大幅减少: {} → {}（减少 {:.1}%）",
-                    local_count, remote_count, -change_ratio * 100.0
+                    local_count,
+                    remote_count,
+                    -change_ratio * 100.0
                 ),
                 details: vec!["⚠️ 远程仓库可能被清空或遭到恶意删除".to_string()],
             });
@@ -252,7 +240,9 @@ impl SecurityScanner {
                 risk_type: RiskType::FileCountAnomaly,
                 description: format!(
                     "文件数量异常增加: {} → {}（增加 {:.1}%）",
-                    local_count, remote_count, change_ratio * 100.0
+                    local_count,
+                    remote_count,
+                    change_ratio * 100.0
                 ),
                 details: vec!["⚠️ 远程新增文件过多，请检查是否包含恶意内容".to_string()],
             });
@@ -280,7 +270,6 @@ impl SecurityScanner {
 
     /// Check sensitive file changes
     fn check_sensitive_files(repo: &Repository, local: Oid, remote: Oid) -> Result<SecurityRisk> {
-
         let local_tree = repo.find_commit(local)?.tree()?;
         let remote_tree = repo.find_commit(remote)?.tree()?;
 
@@ -301,7 +290,8 @@ impl SecurityScanner {
                         let pattern_components: Vec<&str> = pattern.split('/').collect();
                         let path_components: Vec<&str> = path_str.split('/').collect();
                         pattern_components.len() <= path_components.len()
-                            && path_components.windows(pattern_components.len())
+                            && path_components
+                                .windows(pattern_components.len())
                                 .any(|window| window == pattern_components.as_slice())
                     };
                     if matched {
@@ -315,14 +305,20 @@ impl SecurityScanner {
         if !modified_sensitive_files.is_empty() {
             // Check if credential files or CI configs were modified (critical/high risk)
             let credential_modified = modified_sensitive_files.iter().any(|p| {
-                p.contains(".env") || p.ends_with(".pem") || p.ends_with(".key") ||
-                p.contains("id_rsa") || p.contains("kubeconfig") || p.contains("credentials")
+                p.contains(".env")
+                    || p.ends_with(".pem")
+                    || p.ends_with(".key")
+                    || p.contains("id_rsa")
+                    || p.contains("kubeconfig")
+                    || p.contains("credentials")
             });
             let ci_modified = modified_sensitive_files.iter().any(|p| {
                 p.contains("workflows") || p.contains("Jenkinsfile") || p.contains(".gitlab-ci")
             });
-            let gitignore_modified = modified_sensitive_files.iter().any(|p| p.contains(".gitignore"));
-            
+            let gitignore_modified = modified_sensitive_files
+                .iter()
+                .any(|p| p.contains(".gitignore"));
+
             let level = if credential_modified {
                 RiskLevel::Critical
             } else if ci_modified || gitignore_modified {
@@ -334,7 +330,10 @@ impl SecurityScanner {
             return Ok(SecurityRisk {
                 level,
                 risk_type: RiskType::SensitiveFileModified,
-                description: format!("敏感配置文件发生变更: {} 个文件", modified_sensitive_files.len()),
+                description: format!(
+                    "敏感配置文件发生变更: {} 个文件",
+                    modified_sensitive_files.len()
+                ),
                 details: modified_sensitive_files.into_iter().take(5).collect(),
             });
         }
@@ -345,126 +344,6 @@ impl SecurityScanner {
             description: String::new(),
             details: Vec::new(),
         })
-    }
-
-    /// Check suspicious code patterns
-    fn check_suspicious_patterns(repo: &Repository, local: Oid, remote: Oid) -> Result<SecurityRisk> {
-        // Pre-compiled regex (created on each call, but avoids per-file repeated compilation)
-        let patterns = Self::suspicious_patterns();
-
-        let local_tree = repo.find_commit(local)?.tree()?;
-        let remote_tree = repo.find_commit(remote)?.tree()?;
-
-        let diff = repo.diff_tree_to_tree(Some(&local_tree), Some(&remote_tree), None)?;
-
-        let mut found_patterns: Vec<(String, String)> = Vec::new();
-        let mut oversized_files: Vec<(String, String)> = Vec::new();
-
-        for delta in diff.deltas() {
-            // Skip deleted files — removing code is generally safe
-            if delta.status() == git2::Delta::Deleted {
-                continue;
-            }
-
-            if let Some(path) = delta.new_file().path() {
-                let path_str = path.to_string_lossy();
-
-                // Only check code files
-                if !Self::is_code_file(&path_str) {
-                    continue;
-                }
-
-                // Track oversized files separately (Medium risk, not Critical)
-                let file_size = delta.new_file().size() as usize;
-                if file_size > Self::MAX_FILE_SIZE {
-                    oversized_files.push((
-                        path_str.to_string(),
-                        format!("超大文件（{}KB）已跳过模式扫描", file_size / 1024),
-                    ));
-                    continue;
-                }
-
-                // Try to get file content
-                if let Ok(content) = Self::get_file_content(repo, delta.new_file().id()) {
-                    for (re, desc) in patterns.iter() {
-                        if re.is_match(&content) {
-                            found_patterns.push((path_str.to_string(), desc.to_string()));
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        if !found_patterns.is_empty() {
-            let details: Vec<String> = found_patterns
-                .iter()
-                .take(5)
-                .map(|(file, pattern)| format!("{}: {}", file, pattern))
-                .collect();
-
-            return Ok(SecurityRisk {
-                level: RiskLevel::Critical,
-                risk_type: RiskType::SuspiciousCodePattern,
-                description: format!("检测到 {} 处可疑代码模式", found_patterns.len()),
-                details,
-            });
-        }
-
-        if !oversized_files.is_empty() {
-            let details: Vec<String> = oversized_files
-                .iter()
-                .take(5)
-                .map(|(file, desc)| format!("{}: {}", file, desc))
-                .collect();
-
-            return Ok(SecurityRisk {
-                level: RiskLevel::Medium,
-                risk_type: RiskType::SuspiciousCodePattern,
-                description: format!("{} 个超大文件已跳过模式扫描", oversized_files.len()),
-                details,
-            });
-        }
-
-        Ok(SecurityRisk {
-            level: RiskLevel::Safe,
-            risk_type: RiskType::SuspiciousCodePattern,
-            description: String::new(),
-            details: Vec::new(),
-        })
-    }
-
-    /// Get pre-compiled suspicious code patterns
-    fn suspicious_patterns() -> &'static Vec<(regex::Regex, &'static str)> {
-        &SUSPICIOUS_PATTERNS
-    }
-
-    /// Check if it is a code file
-    fn is_code_file(path: &str) -> bool {
-        if let Some(ext) = Path::new(path).extension()
-            && let Some(ext_str) = ext.to_str() {
-                return CODE_EXTENSIONS.iter().any(|&e| e.eq_ignore_ascii_case(ext_str));
-            }
-        false
-    }
-
-    /// Max file size, skip security scan if exceeded
-    const MAX_FILE_SIZE: usize = crate::utils::SECURITY_MAX_FILE_SIZE;
-
-    /// Get file content (with size limit)
-    fn get_file_content(repo: &Repository, id: Oid) -> Result<String> {
-        let blob = repo.find_blob(id)?;
-        let content = blob.content();
-        
-        // Skip large files and binary files
-        if content.len() > Self::MAX_FILE_SIZE {
-            return Ok(String::new()); // Return empty, meaning skip
-        }
-        
-        let content = std::str::from_utf8(content)
-            .unwrap_or("")
-            .to_string();
-        Ok(content)
     }
 
     /// Check committer anomalies
@@ -487,7 +366,7 @@ impl SecurityScanner {
                 let email = committer.email().unwrap_or("未知").to_string();
                 let identity = format!("{} <{}>", name, email);
                 *new_committers.entry(identity.clone()).or_insert(0) += 1;
-                
+
                 // Check if it's a new committer (match by name+email combination)
                 if !known_committers.contains(&identity) {
                     let commit_id = commit.id().to_string();
@@ -496,11 +375,7 @@ impl SecurityScanner {
                     } else {
                         &commit_id
                     };
-                    unknown_committers.push(format!(
-                        "{}（提交: {}）",
-                        identity,
-                        short_id
-                    ));
+                    unknown_committers.push(format!("{}（提交: {}）", identity, short_id));
                 }
             }
         }
@@ -526,11 +401,12 @@ impl SecurityScanner {
     fn get_known_committers(repo: &Repository) -> Result<HashSet<String>> {
         let mut committers = HashSet::new();
         let mut walk = repo.revwalk()?;
-        
+
         if let Ok(head) = repo.head()
-            && let Some(oid) = head.target() {
-                walk.push(oid)?;
-            }
+            && let Some(oid) = head.target()
+        {
+            walk.push(oid)?;
+        }
 
         for oid in walk.take(200) {
             let oid = oid?;
@@ -565,7 +441,7 @@ pub fn format_security_report(result: &SecurityScanResult) -> String {
             risk.level.label().yellow()
         ));
         report.push_str(&format!("   {}\n", risk.description));
-        
+
         if !risk.details.is_empty() {
             report.push_str("   详情:\n");
             for detail in &risk.details {
@@ -576,7 +452,10 @@ pub fn format_security_report(result: &SecurityScanResult) -> String {
 
     if result.max_level.should_block() {
         report.push('\n');
-        report.push_str(&format!("{}", "⚠️ 检测到高风险，建议停止操作！\n".red().bold()));
+        report.push_str(&format!(
+            "{}",
+            "⚠️ 检测到高风险，建议停止操作！\n".red().bold()
+        ));
     }
 
     report
@@ -588,7 +467,6 @@ impl SecurityRisk {
             RiskType::RemoteInaccessible => "远程不可访问".to_string(),
             RiskType::FileCountAnomaly => "文件数量异常".to_string(),
             RiskType::SensitiveFileModified => "敏感文件变更".to_string(),
-            RiskType::SuspiciousCodePattern => "可疑代码模式".to_string(),
             RiskType::CommitterAnomaly => "提交者异常".to_string(),
             RiskType::SignatureVerificationFailed => "签名验证失败".to_string(),
         }
@@ -599,6 +477,46 @@ impl SecurityRisk {
 mod tests {
     use super::*;
 
+    fn commit_file(
+        repo: &Repository,
+        workdir: &Path,
+        relative_path: &str,
+        content: &str,
+        message: &str,
+    ) -> Result<Oid> {
+        let full_path = workdir.join(relative_path);
+        if let Some(parent) = full_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&full_path, content)?;
+
+        let mut index = repo.index()?;
+        index.add_path(Path::new(relative_path))?;
+        index.write()?;
+        let tree_id = index.write_tree()?;
+        let tree = repo.find_tree(tree_id)?;
+        let signature = git2::Signature::now("GetLatestRepo Test", "test@example.com")?;
+
+        let parent_commits = repo
+            .head()
+            .ok()
+            .and_then(|head| head.target())
+            .and_then(|oid| repo.find_commit(oid).ok())
+            .into_iter()
+            .collect::<Vec<_>>();
+        let parent_refs = parent_commits.iter().collect::<Vec<_>>();
+
+        let oid = repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            message,
+            &tree,
+            &parent_refs,
+        )?;
+        Ok(oid)
+    }
+
     #[test]
     fn test_risk_level_ordering() {
         assert!(!RiskLevel::Safe.should_block());
@@ -606,5 +524,38 @@ mod tests {
         assert!(!RiskLevel::Medium.should_block());
         assert!(RiskLevel::High.should_block());
         assert!(RiskLevel::Critical.should_block());
+    }
+
+    #[test]
+    fn suspicious_code_content_does_not_block_security_scan() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let repo = Repository::init(temp.path())?;
+        let local = commit_file(
+            &repo,
+            temp.path(),
+            "src/main.js",
+            "export const value = 1;\n",
+            "initial safe code",
+        )?;
+        let remote = commit_file(
+            &repo,
+            temp.path(),
+            "src/main.js",
+            "export function run(input) { return eval(input); }\n",
+            "add code containing eval",
+        )?;
+
+        let result = SecurityScanner::scan_before_fetch(temp.path(), Some(local), Some(remote))?;
+
+        assert!(
+            result.is_safe,
+            "代码内容模式不应阻塞备份同步，实际风险: {:?}",
+            result.risks
+        );
+        assert!(
+            result.risks.is_empty(),
+            "eval 等内容模式不应再产生安全扫描风险"
+        );
+        Ok(())
     }
 }

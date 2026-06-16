@@ -2,6 +2,37 @@
 
 ---
 
+## [0.1.12] - 2026-06-16
+
+> TUI 自动全量同步、异常修复体验、备份同步可靠性与安全扫描边界调整
+
+### Added
+
+- **交互式 TUI 控制台**: 新增 `getlatestrepo tui` / `getrep tui` 数字菜单，启动后自动执行一次全量同步，再展示已联网校准过的仓库状态。
+- **TUI 全量同步入口**: 新增菜单 `5`，可在 TUI 内再次全量执行 `pull-backup`；菜单 `3` 保留为只修复当前异常列表。
+- **TUI 异常分类汇总**: 顶部汇总拆分为 `本地可修复`、`认证隔离`、`远程异常`，避免只显示笼统异常数量。
+
+### Fixed
+
+- **TUI 数据新鲜度**: 打开 TUI 会先读取本机状态，再自动全量同步并刷新结果，避免第一屏只显示旧 SQLite 快照。
+- **统一打包入口**: `scripts/package.sh` 改为 POSIX `sh` 兼容脚本，固定构建最新 release、复制到 `custom-getlatestrepo`、创建 `getrep` 入口，并修正 `.binquick` 中旧的 workflow alias。
+- **TUI 输入稳定性**: TUI 改为普通行输入模式，方向键、PageUp/PageDown 和鼠标滚轮产生的 ESC 序列只会被忽略，不再导致界面退出。
+- **TUI 操作说明**: 菜单改为三项一行，认证隔离显示为“需要登录/授权”，详情明确“仓库仍在本机”，避免误解为本地仓库已被删除。
+- **Pull-backup 严格镜像语义**: `pull-backup` 现在会处理已同步但存在本地修改的仓库；本地修改会保存到 stash 作为恢复点，随后 hard reset 到远程，不再自动 stash pop 让工作区重新变脏。
+- **Pull-backup 子模块与 symlink 回退**: 备份同步会处理子模块 dirty 状态，并在超长 symlink 导致 stash/reset 失败时使用 `core.symlinks=false` 的原生 Git 回退路径。
+- **Needauth 认证隔离**: 认证失败、授权失败或远程不存在的仓库继续移动到 `needauth/`；TUI 会保留异常状态，不会把未解决认证的仓库显示成正常。
+
+### Changed
+
+- **安全扫描边界调整**: 移除 `eval`、`child_process`、`curl | sh` 等代码内容模式拦截；安全扫描聚焦文件数量异常、敏感文件变更、未知提交者、认证隔离和历史归档保护。
+- **README 用户手册更新**: 补充 TUI 启动自动全量同步、菜单语义、认证隔离说明、`pull-backup` stash 保护语义和安全扫描边界。
+
+### Tests
+
+- **回归测试补强**: 增加 TUI 分类、needauth 展示、限定异常同步、pull-backup dirty/submodule/symlink 处理，以及代码内容模式不再阻塞安全扫描的测试。
+
+---
+
 ## [0.1.11] - 2026-06-16
 
 > 高风险批量确认、远程提交长期留存、版本确认与中文 README 用户手册重写

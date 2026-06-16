@@ -1,5 +1,6 @@
 use anyhow::Result;
 use colored::*;
+use std::collections::HashSet;
 use std::time::Instant;
 
 use crate::cli::OutputFormat;
@@ -25,6 +26,114 @@ enum BatchRiskSelection {
     All,
     Some(std::collections::HashSet<usize>),
     None,
+}
+
+/// 工作流的仓库限定范围。
+///
+/// 普通命令行工作流不设置该范围，继续按扫描源处理全部仓库。TUI 菜单 3
+/// 会把当前异常列表传进来，执行器据此限制 fetch、scan 和 pull 的输入。
+/// 这里同时记录 `id`、`path` 和 “扫描根 + 仓库名 + upstream_url”：
+/// - `id` 能覆盖同一次运行内未移动的数据库记录；
+/// - `path` 能覆盖路径稳定的仓库，也能保留无远程仓库、本地脏仓库等没有
+///   upstream_url 的记录；
+/// - `upstream_url` 兜底处理 fetch 后从 `needauth/` 恢复或移动导致数据库
+///   路径变化的仓库，避免限定范围在工作流中途丢失。
+#[derive(Debug, Clone, Default)]
+struct RepositoryScope {
+    ids: HashSet<i64>,
+    paths: HashSet<String>,
+    upstream_keys: HashSet<RepositoryUpstreamKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RepositoryUpstreamKey {
+    scope_root_path: String,
+    name: String,
+    upstream_url: String,
+}
+
+impl RepositoryScope {
+    fn from_repositories(repos: impl IntoIterator<Item = crate::models::Repository>) -> Self {
+        let mut scope = Self::default();
+
+        for repo in repos {
+            if let Some(id) = repo.id {
+                scope.ids.insert(id);
+            }
+
+            if !repo.path.is_empty() {
+                scope.paths.insert(repo.path.clone());
+            }
+
+            if let Some(upstream_url) = repo.upstream_url
+                && !repo.name.is_empty()
+                && !upstream_url.is_empty()
+            {
+                scope.upstream_keys.insert(RepositoryUpstreamKey {
+                    scope_root_path: Self::normalized_scope_root(&repo.root_path),
+                    name: repo.name,
+                    upstream_url,
+                });
+            }
+        }
+
+        scope
+    }
+
+    fn contains(&self, repo: &crate::models::Repository) -> bool {
+        if let Some(id) = repo.id
+            && self.ids.contains(&id)
+        {
+            return true;
+        }
+
+        if self.paths.contains(&repo.path) {
+            return true;
+        }
+
+        if let Some(upstream_url) = &repo.upstream_url {
+            return self.upstream_keys.contains(&RepositoryUpstreamKey {
+                scope_root_path: Self::normalized_scope_root(&repo.root_path),
+                name: repo.name.clone(),
+                upstream_url: upstream_url.clone(),
+            });
+        }
+
+        false
+    }
+
+    fn normalized_scope_root(root_path: &str) -> String {
+        let path = std::path::Path::new(root_path);
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == crate::utils::NEEDAUTH_DIR)
+            && let Some(parent) = path.parent()
+        {
+            return parent.to_string_lossy().to_string();
+        }
+
+        root_path.to_string()
+    }
+
+    fn len(&self) -> usize {
+        self.paths
+            .len()
+            .max(self.ids.len())
+            .max(self.upstream_keys.len())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.ids.is_empty() && self.paths.is_empty() && self.upstream_keys.is_empty()
+    }
+}
+
+enum ScopedScanOutcome {
+    Fresh(crate::models::Repository),
+    Stale {
+        repo: crate::models::Repository,
+        reason: String,
+    },
 }
 
 /// 解析批量安全确认输入。
@@ -186,6 +295,7 @@ pub struct WorkflowExecutor {
     auto_skip_high_risk: bool,
     pull_safety_check: bool, // Pull safety check (prevent repo deletion)
     proxy: ProxyConfig,
+    target_scope: Option<RepositoryScope>,
 }
 
 impl WorkflowExecutor {
@@ -206,7 +316,22 @@ impl WorkflowExecutor {
             auto_skip_high_risk: false,
             pull_safety_check: true, // Enabled repo-deletion detection by default
             proxy: ProxyConfig::default(),
+            target_scope: None,
         }
+    }
+
+    /// 限定本次工作流只处理指定仓库。
+    ///
+    /// 这个接口由 TUI 使用：菜单 3 的语义是“处理当前异常列表”，不是重新对
+    /// 全库执行 `pull-backup`。限定范围放在执行器层，是为了让 fetch、scan、
+    /// pull 三个阶段都共享同一条边界，避免只限制最后一步造成前面仍然联网
+    /// fetch 341 个仓库。
+    pub fn with_target_repositories(
+        mut self,
+        repos: impl IntoIterator<Item = crate::models::Repository>,
+    ) -> Self {
+        self.target_scope = Some(RepositoryScope::from_repositories(repos));
+        self
     }
 
     /// Set whether to enable the security scan
@@ -233,6 +358,47 @@ impl WorkflowExecutor {
         self
     }
 
+    fn has_target_scope(&self) -> bool {
+        self.target_scope.is_some()
+    }
+
+    fn target_scope_len(&self) -> usize {
+        self.target_scope
+            .as_ref()
+            .map(RepositoryScope::len)
+            .unwrap_or(0)
+    }
+
+    /// 根据当前执行范围筛选数据库仓库记录。
+    ///
+    /// 未设置限定范围时，工作流沿用历史行为：只处理启用扫描源下的仓库。
+    /// 设置限定范围时，来源是 TUI 已展示给用户的异常列表，因此这里优先按
+    /// 目标集合过滤，而不是再次扩展为扫描源下的全量仓库。
+    fn repositories_for_scope(
+        &self,
+        db: &Database,
+        sources: &[crate::models::ScanSource],
+    ) -> Result<Vec<crate::models::Repository>> {
+        let all_repos = db.list_repositories()?;
+
+        if let Some(scope) = &self.target_scope {
+            if scope.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            return Ok(all_repos
+                .into_iter()
+                .filter(|repo| scope.contains(repo))
+                .collect());
+        }
+
+        let source_paths: HashSet<_> = sources.iter().map(|s| s.root_path.as_str()).collect();
+        Ok(all_repos
+            .into_iter()
+            .filter(|repo| source_paths.contains(repo.root_path.as_str()))
+            .collect())
+    }
+
     /// Execute the workflow
     pub async fn execute(&self) -> Result<WorkflowResult> {
         let start = Instant::now();
@@ -244,6 +410,13 @@ impl WorkflowExecutor {
             println!("│ {:<58} │", title.bold());
             println!("│ {:<58} │", desc.dimmed());
             println!("└────────────────────────────────────────────────────────────┘");
+            if self.has_target_scope() {
+                println!(
+                    "  {} 本次仅处理限定范围内的 {} 个仓库",
+                    "ℹ".blue(),
+                    self.target_scope_len()
+                );
+            }
             println!();
         }
 
@@ -286,9 +459,15 @@ impl WorkflowExecutor {
                     let timeout = timeout.unwrap_or(self.timeout);
 
                     if !self.silent {
+                        let scope_name = if self.has_target_scope() {
+                            "Fetch 限定仓库"
+                        } else {
+                            "Fetch 所有仓库"
+                        };
                         println!(
-                            "  [{}] Fetch 所有仓库",
-                            format!("{}/{}", step_num, total_steps).cyan()
+                            "  [{}] {}",
+                            format!("{}/{}", step_num, total_steps).cyan(),
+                            scope_name
                         );
                     }
 
@@ -672,7 +851,7 @@ impl WorkflowExecutor {
                         Ok(pull_result) => {
                             if !self.silent {
                                 if pull_result.total_count == 0 {
-                                    println!("  └─ {} 没有需要更新的仓库", "ℹ".blue());
+                                    println!("  └─ {} 没有需要同步或清理的仓库", "ℹ".blue());
                                 } else {
                                     println!(
                                         "  └─ {} 成功: {} | 失败: {}",
@@ -843,32 +1022,29 @@ impl WorkflowExecutor {
         jobs: usize,
         timeout: u64,
     ) -> Result<FetchSummary> {
-        // Auto-sync: check for and scan new repositories
-        let app_config = AppConfig::load()?;
-        let sync = crate::sync::RepoSync::new(app_config.sync.auto_sync);
-        let sync_status = sync.ensure_synced(sources, db, !self.silent).await?;
+        // 限定范围来自 TUI 已刷新过的异常列表，不需要为了发现新仓库再次扫描
+        // 整个根目录。普通工作流仍保留 auto-sync 行为，防止配置源新增仓库后
+        // fetch 阶段看不到最新数据库记录。
+        if !self.has_target_scope() {
+            let app_config = AppConfig::load()?;
+            let sync = crate::sync::RepoSync::new(app_config.sync.auto_sync);
+            let sync_status = sync.ensure_synced(sources, db, !self.silent).await?;
 
-        if !self.silent && sync_status.needs_scan() {
-            println!("  ├─ {}\n", sync_status.description());
+            if !self.silent && sync_status.needs_scan() {
+                println!("  ├─ {}\n", sync_status.description());
+            }
         }
 
-        let all_repos = db.list_repositories()?;
-        let source_paths: std::collections::HashSet<_> =
-            sources.iter().map(|s| s.root_path.as_str()).collect();
-
-        let mut repos: Vec<_> = all_repos
-            .into_iter()
-            .filter(|r| source_paths.contains(r.root_path.as_str()))
-            .collect();
+        let mut repos = self.repositories_for_scope(db, sources)?;
 
         if repos.is_empty() {
+            if self.has_target_scope() {
+                anyhow::bail!("限定范围内未找到仓库");
+            }
+
             let _ = Scanner::scan_all(sources, db, false, jobs).await?;
 
-            let all_repos = db.list_repositories()?;
-            repos = all_repos
-                .into_iter()
-                .filter(|r| source_paths.contains(r.root_path.as_str()))
-                .collect();
+            repos = self.repositories_for_scope(db, sources)?;
         }
         if repos.is_empty() {
             anyhow::bail!("未找到仓库");
@@ -897,16 +1073,24 @@ impl WorkflowExecutor {
             terminal::TerminalReporter,
         };
 
-        let repos = Scanner::scan_all(
-            sources,
-            db,
-            false,
-            crate::utils::DEFAULT_MAX_CONCURRENT_SCAN,
-        )
-        .await?;
+        let repos = if self.has_target_scope() {
+            self.scan_repositories_for_scope(db, sources).await?
+        } else {
+            Scanner::scan_all(
+                sources,
+                db,
+                false,
+                crate::utils::DEFAULT_MAX_CONCURRENT_SCAN,
+            )
+            .await?
+        };
 
         if repos.is_empty() {
-            anyhow::bail!("未找到 Git 仓库");
+            if self.has_target_scope() {
+                anyhow::bail!("限定范围内未找到 Git 仓库");
+            } else {
+                anyhow::bail!("未找到 Git 仓库");
+            }
         }
 
         let filtered_repos: Vec<_> = if only_dirty_or_behind {
@@ -971,6 +1155,103 @@ impl WorkflowExecutor {
         Ok(summary)
     }
 
+    /// 只刷新限定范围内的仓库状态。
+    ///
+    /// TUI 选择菜单 3 时，用户已经在界面上看到了明确的异常仓库集合。这里不再
+    /// 调用 `Scanner::scan_all()` 遍历整个扫描源，而是对目标仓库逐个执行
+    /// `GitOps::inspect()`：成功则写回数据库，失败或路径不存在则保留旧快照。
+    /// 这样报告和后续 pull 阶段仍能展示异常记录，同时不会把 341 个仓库重新纳入
+    /// 本次同步流程。
+    async fn scan_repositories_for_scope(
+        &self,
+        db: &Database,
+        sources: &[crate::models::ScanSource],
+    ) -> Result<Vec<crate::models::Repository>> {
+        let stored_repos = self.repositories_for_scope(db, sources)?;
+        if stored_repos.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let tasks: Vec<_> = stored_repos
+            .into_iter()
+            .map(|stored| {
+                move || {
+                    let path = std::path::PathBuf::from(&stored.path);
+                    if !path.exists() {
+                        return ScopedScanOutcome::Stale {
+                            repo: stored,
+                            reason: "路径不存在，保留数据库中的最后快照".to_string(),
+                        };
+                    }
+
+                    match crate::git::GitOps::inspect(&path, &stored.root_path) {
+                        Ok(mut refreshed) => {
+                            refreshed.id = stored.id;
+                            refreshed.last_fetch_at = stored.last_fetch_at;
+                            refreshed.last_pull_at = stored.last_pull_at;
+                            ScopedScanOutcome::Fresh(refreshed)
+                        }
+                        Err(e) => ScopedScanOutcome::Stale {
+                            repo: stored,
+                            reason: format!("重新检查失败：{e}"),
+                        },
+                    }
+                }
+            })
+            .collect();
+
+        let results = crate::concurrent::execute_concurrent_raw(
+            tasks,
+            crate::utils::DEFAULT_MAX_CONCURRENT_SCAN,
+        );
+        let mut repos = Vec::new();
+        let mut stale_count = 0usize;
+
+        for result in results {
+            match result {
+                Some(ScopedScanOutcome::Fresh(mut repo)) => {
+                    if let Err(e) = db.upsert_repository(&mut repo) {
+                        eprintln!(
+                            "   {} 限定扫描写入失败 {}: {}",
+                            "⚠".yellow(),
+                            crate::utils::sanitize_path(&repo.path),
+                            e
+                        );
+                    }
+                    repos.push(repo);
+                }
+                Some(ScopedScanOutcome::Stale { repo, reason }) => {
+                    stale_count += 1;
+                    if !self.silent {
+                        eprintln!(
+                            "   {} 限定扫描保留旧快照 {}: {}",
+                            "⚠".yellow(),
+                            crate::utils::sanitize_path(&repo.path),
+                            reason
+                        );
+                    }
+                    repos.push(repo);
+                }
+                None => {
+                    stale_count += 1;
+                    if !self.silent {
+                        eprintln!("   {} 限定扫描任务 panic，已跳过一条记录", "⚠".yellow());
+                    }
+                }
+            }
+        }
+
+        if stale_count > 0 && !self.silent {
+            eprintln!(
+                "   {} 限定扫描有 {} 条记录无法刷新，报告中会保留旧快照",
+                "⚠".yellow(),
+                stale_count
+            );
+        }
+
+        Ok(repos)
+    }
+
     /// Execute the check step
     fn execute_check(&self, condition: &Condition, result: &WorkflowResult) -> Result<(), String> {
         let summary = match &result.repo_summary {
@@ -1012,7 +1293,7 @@ impl WorkflowExecutor {
 
     /// 在 pull/reset 前执行真实远程差异安全扫描。
     ///
-    /// fetch 之前本地还没有最新远程对象，无法可靠分析敏感文件、可疑代码和未知提交者。
+    /// fetch 之前本地还没有最新远程对象，无法可靠分析敏感文件、文件数量变化和未知提交者。
     /// 因此这里在 workflow 的 fetch + scan 之后、实际 merge/reset 之前比较 `HEAD`
     /// 与 upstream tracking ref，发现高风险时默认跳过，避免风险提交进入工作区。
     async fn filter_repos_by_pull_security(
@@ -1210,16 +1491,13 @@ impl WorkflowExecutor {
     ) -> Result<PullSafeResult> {
         // Concurrency control uses standard library synchronization primitives
 
-        let all_repos = db.list_repositories()?;
-        let source_paths: std::collections::HashSet<_> =
-            sources.iter().map(|s| s.root_path.as_str()).collect();
-
-        let repos: Vec<_> = all_repos
-            .into_iter()
-            .filter(|r| source_paths.contains(r.root_path.as_str()))
-            .collect();
+        let repos = self.repositories_for_scope(db, sources)?;
         if repos.is_empty() {
-            anyhow::bail!("未找到仓库");
+            if self.has_target_scope() {
+                anyhow::bail!("限定范围内未找到仓库");
+            } else {
+                anyhow::bail!("未找到仓库");
+            }
         }
 
         let (behind_repos, up_to_date_repos): (Vec<_>, Vec<_>) = repos
@@ -1773,32 +2051,47 @@ impl WorkflowExecutor {
     ) -> Result<super::types::PullBackupResult> {
         use crate::concurrent::execute_concurrent_raw;
 
-        let all_repos = db.list_repositories()?;
-        let source_paths: std::collections::HashSet<_> =
-            sources.iter().map(|s| s.root_path.as_str()).collect();
-
-        let repos: Vec<_> = all_repos
-            .into_iter()
-            .filter(|r| source_paths.contains(r.root_path.as_str()))
-            .collect();
+        let repos = self.repositories_for_scope(db, sources)?;
         if repos.is_empty() {
-            anyhow::bail!("未找到仓库");
+            if self.has_target_scope() {
+                anyhow::bail!("限定范围内未找到仓库");
+            } else {
+                anyhow::bail!("未找到仓库");
+            }
         }
 
-        let mut behind_repos: Vec<_> = repos
+        let mut backup_repos: Vec<_> = repos
             .into_iter()
-            .filter(|r| r.freshness == Freshness::HasUpdates)
+            .filter(|r| r.freshness == Freshness::HasUpdates || r.dirty)
             .collect();
 
-        if behind_repos.is_empty() {
+        if backup_repos.is_empty() {
             return Ok(super::types::PullBackupResult::new());
         }
 
-        let (filtered_repos, _security_skipped) =
-            self.filter_repos_by_pull_security(behind_repos).await?;
-        behind_repos = filtered_repos;
+        let remote_update_paths: std::collections::HashSet<String> = backup_repos
+            .iter()
+            .filter(|repo| repo.freshness == Freshness::HasUpdates)
+            .map(|repo| repo.path.clone())
+            .collect();
 
-        if behind_repos.is_empty() {
+        if !remote_update_paths.is_empty() {
+            let security_candidates: Vec<_> = backup_repos
+                .iter()
+                .filter(|repo| remote_update_paths.contains(&repo.path))
+                .cloned()
+                .collect();
+            let (filtered_repos, _security_skipped) = self
+                .filter_repos_by_pull_security(security_candidates)
+                .await?;
+            let allowed_paths: std::collections::HashSet<String> =
+                filtered_repos.into_iter().map(|repo| repo.path).collect();
+            backup_repos.retain(|repo| {
+                repo.freshness != Freshness::HasUpdates || allowed_paths.contains(&repo.path)
+            });
+        }
+
+        if backup_repos.is_empty() {
             return Ok(super::types::PullBackupResult::new());
         }
 
@@ -1806,7 +2099,7 @@ impl WorkflowExecutor {
         let mut original_oids: std::collections::HashMap<String, git2::Oid> =
             std::collections::HashMap::new();
         if diff_after {
-            for repo in &behind_repos {
+            for repo in &backup_repos {
                 let path = std::path::PathBuf::from(&repo.path);
                 if let Ok(repo_git) = git2::Repository::open(&path)
                     && let Ok(head) = repo_git.head()
@@ -1817,7 +2110,7 @@ impl WorkflowExecutor {
             }
         }
 
-        let tasks: Vec<_> = behind_repos
+        let tasks: Vec<_> = backup_repos
             .into_iter()
             .map(|repo| {
                 let path = std::path::PathBuf::from(&repo.path);
@@ -2016,16 +2309,13 @@ impl WorkflowExecutor {
     ) -> Result<PullForceResult> {
         // Concurrency control uses standard library synchronization primitives
 
-        let all_repos = db.list_repositories()?;
-        let source_paths: std::collections::HashSet<_> =
-            sources.iter().map(|s| s.root_path.as_str()).collect();
-
-        let repos: Vec<_> = all_repos
-            .into_iter()
-            .filter(|r| source_paths.contains(r.root_path.as_str()))
-            .collect();
+        let repos = self.repositories_for_scope(db, sources)?;
         if repos.is_empty() {
-            anyhow::bail!("未找到仓库");
+            if self.has_target_scope() {
+                anyhow::bail!("限定范围内未找到仓库");
+            } else {
+                anyhow::bail!("未找到仓库");
+            }
         }
 
         let mut behind_repos: Vec<_> = repos
@@ -2301,12 +2591,12 @@ impl WorkflowExecutor {
                     let jobs = jobs.unwrap_or(self.jobs);
                     println!("  [{}] PullBackup", step_num);
                     println!(
-                        "      流程: stash（如有本地变更）→ git reset --hard origin/<branch> → stash pop"
+                        "      流程: stash 保护本地变更（不自动 pop）→ git reset --hard origin/<branch>"
                     );
                     println!("      策略: 严格镜像远程，可处理 force-push / rebase");
                     println!("      显示差异: {}", yes_no(*diff_after));
                     println!("      并发: {}", jobs);
-                    println!("      冲突处理: 停止并提示手动解决");
+                    println!("      恢复方式: 如需找回本地修改，手动查看 git stash list");
                 }
             }
             println!();
@@ -2331,6 +2621,63 @@ fn yes_no(value: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scoped_repo(
+        id: Option<i64>,
+        name: &str,
+        path: &str,
+        root_path: &str,
+        upstream_url: Option<&str>,
+    ) -> crate::models::Repository {
+        crate::models::Repository {
+            id,
+            name: name.to_string(),
+            path: path.to_string(),
+            root_path: root_path.to_string(),
+            upstream_url: upstream_url.map(str::to_string),
+            ..crate::models::Repository::default()
+        }
+    }
+
+    #[test]
+    fn repository_scope_matches_original_path_and_upstream_identity() {
+        let scope = RepositoryScope::from_repositories(vec![scoped_repo(
+            Some(7),
+            "demo",
+            "/work/demo",
+            "/work",
+            Some("https://example.com/demo.git"),
+        )]);
+
+        assert!(scope.contains(&scoped_repo(
+            Some(7),
+            "demo",
+            "/work/demo",
+            "/work",
+            Some("https://example.com/demo.git"),
+        )));
+        assert!(scope.contains(&scoped_repo(
+            None,
+            "demo",
+            "/work/needauth/demo",
+            "/work/needauth",
+            Some("https://example.com/demo.git"),
+        )));
+        assert!(!scope.contains(&scoped_repo(
+            None,
+            "other",
+            "/work/other",
+            "/work",
+            Some("https://example.com/other.git"),
+        )));
+        assert!(!scope.contains(&scoped_repo(
+            None,
+            "demo",
+            "/other-root/demo",
+            "/other-root",
+            Some("https://example.com/demo.git"),
+        )));
+    }
 
     #[test]
     fn parse_batch_risk_selection_accepts_all() {

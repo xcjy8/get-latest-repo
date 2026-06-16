@@ -1,14 +1,15 @@
 //! Command handler module
-//! 
+//!
 //! Separate CLI command handling logic from main.rs, one module per subcommand.
 
+pub mod config;
+pub mod discard;
+pub mod fetch;
 pub mod init;
 pub mod scan;
-pub mod fetch;
 pub mod status;
-pub mod config;
+pub mod tui;
 pub mod workflow;
-pub mod discard;
 
 use anyhow::Result;
 use colored::Colorize;

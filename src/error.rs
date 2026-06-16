@@ -22,10 +22,7 @@ pub enum GetLatestRepoError {
     NotGitRepo(String),
 
     #[error("无法打开仓库 {path}: {source}")]
-    OpenRepo {
-        path: String,
-        source: git2::Error,
-    },
+    OpenRepo { path: String, source: git2::Error },
 
     #[error("需要认证 (401/403): {0}")]
     AuthRequired(String),
@@ -100,7 +97,7 @@ pub enum GetLatestRepoError {
 pub type Result<T> = std::result::Result<T, GetLatestRepoError>;
 
 /// Convert from FetchStatus to GetLatestRepoError
-/// 
+///
 /// Only error statuses should be converted; Success should not be converted.
 /// The caller should check for Success before converting.
 impl TryFrom<crate::git::FetchStatus> for GetLatestRepoError {
@@ -109,10 +106,16 @@ impl TryFrom<crate::git::FetchStatus> for GetLatestRepoError {
     fn try_from(status: crate::git::FetchStatus) -> std::result::Result<Self, Self::Error> {
         use crate::git::FetchStatus;
         match status {
-            FetchStatus::AuthenticationRequired { message } => Ok(GetLatestRepoError::AuthRequired(message)),
-            FetchStatus::RepositoryNotFound { message } => Ok(GetLatestRepoError::RepoNotFound(message)),
+            FetchStatus::AuthenticationRequired { message } => {
+                Ok(GetLatestRepoError::AuthRequired(message))
+            }
+            FetchStatus::RepositoryNotFound { message } => {
+                Ok(GetLatestRepoError::RepoNotFound(message))
+            }
             FetchStatus::NetworkError { message } => Ok(GetLatestRepoError::Network(message)),
-            FetchStatus::OtherError { message } => Ok(GetLatestRepoError::Other(anyhow::anyhow!(message))),
+            FetchStatus::OtherError { message } => {
+                Ok(GetLatestRepoError::Other(anyhow::anyhow!(message)))
+            }
             FetchStatus::Success => Err(anyhow::anyhow!(
                 "不能将 FetchStatus::Success 转换为 GetLatestRepoError，请在转换前先检查状态"
             )),

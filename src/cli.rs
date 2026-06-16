@@ -82,6 +82,9 @@ pub enum Commands {
         issues: bool,
     },
 
+    /// 打开数字菜单式仓库状态控制台
+    Tui,
+
     /// 配置管理
     Config {
         #[command(subcommand)]

@@ -432,6 +432,8 @@ impl Fetcher {
                 let repo_path = original_path.clone();
                 let repo_name = repo.name.clone();
                 let root_path = repo.root_path.clone();
+                let scan_root = Self::scan_root_for_needauth_record(&root_path);
+                let needauth_root = scan_root.join(crate::utils::NEEDAUTH_DIR);
                 let proxy_for_retry = proxy.clone();
 
                 // fetch 会更新 refs/remotes/*。先归档当前 tracking refs，才能保护
@@ -520,8 +522,7 @@ impl Fetcher {
                 // 3. Handle needauth move or restore
                 let (current_repo, result, moved_repo_name, restored_from_needauth) =
                     if fetch_status.should_move_to_needauth() && move_to_needauth {
-                        let needauth_dir =
-                            std::path::PathBuf::from(&root_path).join(crate::utils::NEEDAUTH_DIR);
+                        let needauth_dir = needauth_root.clone();
                         let needauth_path = needauth_dir.join(&repo_name);
 
                         let repo_path_clone = repo_path.clone();
@@ -557,15 +558,20 @@ impl Fetcher {
                                     .map(|n| n.to_string_lossy().to_string())
                                     .unwrap_or_else(|| repo_name.clone());
 
-                                // Write sidecar file preserving original relative path for accurate restore
-                                let original_relative = std::path::Path::new(&original_path)
-                                    .strip_prefix(&root_path)
-                                    .unwrap_or(std::path::Path::new(&repo_name));
+                                // Write sidecar file preserving original relative path for accurate restore.
+                                // 已在 needauth 中的仓库可能已经有 sidecar；这种情况下优先沿用
+                                // sidecar 中的真实原始相对路径，避免再次移动时写入
+                                // `needauth/needauth/...` 这种污染路径。
+                                let original_relative = Self::read_needauth_sidecar(&original_path)
+                                    .unwrap_or_else(|| {
+                                        std::path::Path::new(&original_path)
+                                            .strip_prefix(&scan_root)
+                                            .unwrap_or(std::path::Path::new(&repo_name))
+                                            .to_string_lossy()
+                                            .to_string()
+                                    });
                                 let sidecar_path = final_path.join(".needauth_original_path");
-                                let _ = std::fs::write(
-                                    &sidecar_path,
-                                    original_relative.to_string_lossy().as_bytes(),
-                                );
+                                let _ = std::fs::write(&sidecar_path, original_relative.as_bytes());
 
                                 let mut new_repo = repo.with_new_path(new_repo_path, new_root_path);
                                 let name_for_result = final_name.clone();
@@ -596,26 +602,18 @@ impl Fetcher {
                             }
                         }
                     } else if matches!(fetch_status, FetchStatus::Success)
-                        && original_path.contains(crate::utils::NEEDAUTH_DIR)
+                        && Self::path_is_in_needauth(&original_path, &needauth_root)
                     {
                         // Restore path: prefer sidecar file (.needauth_original_path) for accurate
                         // nested path restoration; fall back to direct-child assumption for legacy entries.
-                        let sidecar_path =
-                            std::path::Path::new(&original_path).join(".needauth_original_path");
                         let original_repo_path =
-                            if let Ok(relative) = std::fs::read_to_string(&sidecar_path) {
-                                let relative = relative.trim();
-                                std::path::PathBuf::from(&root_path).join(relative)
+                            if let Some(relative) = Self::read_needauth_sidecar(&original_path) {
+                                scan_root.join(relative)
                             } else {
-                                let needauth_parent = std::path::Path::new(&original_path)
-                                    .parent()
-                                    .and_then(|p| p.parent())
-                                    .map(|p| p.to_path_buf())
-                                    .unwrap_or_else(|| std::path::PathBuf::from(&root_path));
-                                needauth_parent.join(&repo_name)
+                                scan_root.join(&repo_name)
                             };
                         // needauth_parent 必须是扫描根目录，而非嵌套父目录，否则 root_path 会被错误记录
-                        let needauth_parent = std::path::PathBuf::from(&root_path);
+                        let needauth_parent = scan_root.clone();
 
                         let from_path = original_path.clone();
                         let upstream = repo.upstream_url.clone();
@@ -643,7 +641,7 @@ impl Fetcher {
                             Ok(restored_path) => {
                                 let new_path = restored_path.to_string_lossy().to_string();
                                 // root_path 必须是原始扫描根目录，不能是嵌套父目录
-                                let new_root = root_path.clone();
+                                let new_root = scan_root.to_string_lossy().to_string();
                                 let mut restored_repo = repo.with_new_path(new_path, new_root);
                                 restored_repo.name = repo_name.clone();
 
@@ -849,6 +847,37 @@ impl Fetcher {
         }
 
         Ok(())
+    }
+
+    /// 从数据库记录里的 `root_path` 还原真实扫描根目录。
+    ///
+    /// 早期版本会把已经位于 `needauth/` 的仓库再次移动到
+    /// `needauth/needauth/...`，同时把嵌套目录写回 `root_path`。这里循环剥离末尾
+    /// 的 `needauth` 组件，后续移动和恢复都只以原始扫描根为准。
+    fn scan_root_for_needauth_record(root_path: &str) -> std::path::PathBuf {
+        let mut root = std::path::PathBuf::from(root_path);
+        while root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == crate::utils::NEEDAUTH_DIR)
+        {
+            if !root.pop() {
+                break;
+            }
+        }
+        root
+    }
+
+    fn path_is_in_needauth(path: &str, needauth_root: &std::path::Path) -> bool {
+        std::path::Path::new(path).starts_with(needauth_root)
+    }
+
+    fn read_needauth_sidecar(path: &str) -> Option<String> {
+        let sidecar_path = std::path::Path::new(path).join(".needauth_original_path");
+        std::fs::read_to_string(&sidecar_path)
+            .ok()
+            .map(|content| content.trim().to_string())
+            .filter(|content| !content.is_empty())
     }
 
     /// Move repository to needauth directory
@@ -1844,6 +1873,51 @@ mod tests {
             repo_dir.join(".git").exists(),
             ".git directory must still exist"
         );
+    }
+
+    #[test]
+    fn needauth_scan_root_strips_repeated_needauth_suffixes() {
+        let tmp = TempDir::new().unwrap();
+        let polluted_root = tmp
+            .path()
+            .join("needauth")
+            .join("needauth")
+            .join("needauth");
+
+        assert_eq!(
+            Fetcher::scan_root_for_needauth_record(&polluted_root.to_string_lossy()),
+            tmp.path()
+        );
+    }
+
+    #[test]
+    fn move_repo_from_nested_needauth_back_to_canonical_needauth() {
+        let tmp = TempDir::new().unwrap();
+        let nested_repo = tmp
+            .path()
+            .join("needauth")
+            .join("needauth")
+            .join("needauth")
+            .join("repo");
+        fs::create_dir_all(&nested_repo).unwrap();
+        init_git_repo(&nested_repo);
+
+        let canonical_needauth = tmp.path().join("needauth");
+        let canonical_target = canonical_needauth.join("repo");
+
+        Fetcher::move_repo_to_needauth(
+            nested_repo.to_str().unwrap(),
+            &canonical_target,
+            &canonical_needauth,
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            !nested_repo.exists(),
+            "嵌套 needauth 源目录应被移动回标准隔离目录"
+        );
+        assert!(canonical_target.join(".git").exists());
     }
 
     #[test]

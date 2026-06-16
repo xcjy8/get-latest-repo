@@ -32,7 +32,6 @@ impl Freshness {
             Freshness::NoRemote => "⚪",
         }
     }
-
 }
 
 impl From<&str> for Freshness {
@@ -65,7 +64,11 @@ impl Default for ScanSource {
             id: None,
             root_path: String::new(),
             max_depth: 5,
-            ignore_patterns: vec![".git".to_string(), "node_modules".to_string(), "target".to_string()],
+            ignore_patterns: vec![
+                ".git".to_string(),
+                "node_modules".to_string(),
+                "target".to_string(),
+            ],
             follow_symlinks: false,
             enabled: true,
             last_scan_at: None,
@@ -81,7 +84,7 @@ pub struct Repository {
     pub root_path: String,
     pub name: String,
     pub depth: u32,
-    
+
     // Git Status
     pub branch: Option<String>,
     pub dirty: bool,
@@ -93,12 +96,12 @@ pub struct Repository {
     pub dirty_files: Vec<String>,
     pub upstream_ref: Option<String>,
     pub upstream_url: Option<String>,
-    
+
     // Sync status
     pub ahead_count: i32,
     pub behind_count: i32,
     pub freshness: Freshness,
-    
+
     // Timestamps
     pub last_commit_at: Option<DateTime<Local>>,
     pub last_commit_message: Option<String>,
@@ -110,7 +113,7 @@ pub struct Repository {
 
 impl Repository {
     /// Create repository instance with new path (for needauth move scenario)
-    /// 
+    ///
     /// Reuse all other fields, only update path-related info.
     /// Depth is recalculated based on new_path relative to new_root_path.
     pub fn with_new_path(self, new_path: String, new_root_path: String) -> Self {
@@ -131,10 +134,10 @@ impl Repository {
         if self.file_changes.is_empty() {
             return format!("{} 个文件有变更", self.dirty_files.len());
         }
-        
+
         let staged = self.file_changes.iter().filter(|fc| fc.staged).count();
         let unstaged = self.file_changes.len() - staged;
-        
+
         if staged > 0 && unstaged > 0 {
             format!("{} 个已暂存，{} 个未暂存", staged, unstaged)
         } else if staged > 0 {
@@ -241,7 +244,7 @@ impl FileChange {
         let path = path.into();
         let status = status.into();
         let (impact, stash_effect) = Self::describe_change(&status, staged);
-        
+
         Self {
             path,
             status,
@@ -254,7 +257,7 @@ impl FileChange {
     /// Describe change impact and stash effect
     fn describe_change(status: &str, staged: bool) -> (String, String) {
         let stage_info = if staged { "（已暂存）" } else { "" };
-        
+
         match status {
             "added" => {
                 let impact = format!("{}新增文件，将进入提交", stage_info);

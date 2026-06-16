@@ -1,6 +1,6 @@
 [package]
 name = "getlatestrepo"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2024"
 rust-version = "1.85"
 description = "A fast and elegant local Git repository manager written in Rust"
@@ -43,7 +43,6 @@ chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1.0"
 thiserror = "1.0"
 walkdir = "2.5"
-regex = "1.10"
 
 # Security scan
 url = "2.5"

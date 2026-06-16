@@ -31,7 +31,10 @@ pub async fn execute(path: PathBuf) -> Result<()> {
     }
 
     print_success(&format!("已添加扫描源：{}", canonical.display()));
-    print_info(&format!("配置文件：{}", AppConfig::config_path()?.display()));
+    print_info(&format!(
+        "配置文件：{}",
+        AppConfig::config_path()?.display()
+    ));
     print_info(&format!("数据库：{}", Database::db_path()?.display()));
     println!();
     println!("{} 下一步:", "▶".cyan());

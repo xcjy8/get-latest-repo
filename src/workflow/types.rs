@@ -20,7 +20,10 @@ pub struct Workflow {
 #[derive(Debug, Clone)]
 pub enum WorkflowStep {
     /// Fetch all repositories
-    Fetch { jobs: Option<usize>, timeout: Option<u64> },
+    Fetch {
+        jobs: Option<usize>,
+        timeout: Option<u64>,
+    },
     /// Scan and generate report
     Scan {
         output: OutputFormat,
@@ -30,11 +33,21 @@ pub enum WorkflowStep {
     /// Condition check
     Check { condition: Condition, silent: bool },
     /// Security pull (clean repositories only)
-    PullSafe { jobs: Option<usize>, confirm: bool, diff_after: bool },
+    PullSafe {
+        jobs: Option<usize>,
+        confirm: bool,
+        diff_after: bool,
+    },
     /// Force pull (stash → pull → pop)
-    PullForce { jobs: Option<usize>, diff_after: bool },
-    /// Backup pull (stash → hard reset → pop) — mirrors remote exactly
-    PullBackup { jobs: Option<usize>, diff_after: bool },
+    PullForce {
+        jobs: Option<usize>,
+        diff_after: bool,
+    },
+    /// Backup pull (stash as recovery point → hard reset) — mirrors remote exactly
+    PullBackup {
+        jobs: Option<usize>,
+        diff_after: bool,
+    },
 }
 
 /// Check condition
@@ -158,7 +171,8 @@ impl BuiltInWorkflows {
     fn pull_safe() -> Workflow {
         Workflow {
             name: "pull-safe".to_string(),
-            description: "安全更新：fetch → scan → pull 干净仓库（自动跳过有本地变更的仓库）".to_string(),
+            description: "安全更新：fetch → scan → pull 干净仓库（自动跳过有本地变更的仓库）"
+                .to_string(),
             steps: vec![
                 WorkflowStep::Fetch {
                     jobs: Some(5),
@@ -171,7 +185,7 @@ impl BuiltInWorkflows {
                 },
                 WorkflowStep::PullSafe {
                     jobs: Some(5),
-                    confirm: true,  // Confirm by default
+                    confirm: true, // Confirm by default
                     diff_after: false,
                 },
             ],
@@ -253,10 +267,10 @@ pub struct DirtyRepoInfo {
 
 impl DirtyRepoInfo {
     pub fn new(
-        name: impl Into<String>, 
-        path: impl Into<String>, 
+        name: impl Into<String>,
+        path: impl Into<String>,
         branch: Option<String>,
-        file_changes: Vec<crate::models::FileChange>
+        file_changes: Vec<crate::models::FileChange>,
     ) -> Self {
         Self {
             name: name.into(),
@@ -270,7 +284,7 @@ impl DirtyRepoInfo {
     pub fn change_summary(&self) -> String {
         let staged = self.file_changes.iter().filter(|fc| fc.staged).count();
         let unstaged = self.file_changes.len() - staged;
-        
+
         if staged > 0 && unstaged > 0 {
             format!("{} 个已暂存，{} 个未暂存", staged, unstaged)
         } else if staged > 0 {
@@ -287,8 +301,8 @@ pub struct PullSafeResult {
     pub total_count: usize,
     pub success_count: usize,
     pub failed_count: usize,
-    pub skipped_repos: Vec<String>,  // Already up to date
-    pub dirty_repos: Vec<DirtyRepoInfo>,    // Skipped due to local changes (includes file list)
+    pub skipped_repos: Vec<String>,               // Already up to date
+    pub dirty_repos: Vec<DirtyRepoInfo>, // Skipped due to local changes (includes file list)
     pub pulled_repos: Vec<(String, Vec<String>)>, // (repository name, new commit list)
     pub success_repos: Vec<(String, Option<String>)>, // (repository name, latest commit message)
 }
@@ -409,8 +423,13 @@ pub fn list_workflows() {
     println!("{} 可用工作流:\n", "ℹ".blue());
 
     for workflow in BuiltInWorkflows::all() {
-        println!("  {} {}", workflow.name.cyan().bold(), workflow.description.dimmed());
-        println!("     步骤: {} | 默认并发: {} | 超时: {} 秒\n",
+        println!(
+            "  {} {}",
+            workflow.name.cyan().bold(),
+            workflow.description.dimmed()
+        );
+        println!(
+            "     步骤: {} | 默认并发: {} | 超时: {} 秒\n",
             workflow.steps.len(),
             workflow.default_jobs,
             workflow.default_timeout
@@ -423,14 +442,13 @@ pub fn list_workflows() {
 }
 
 /// Open report file
-/// 
+///
 /// # Security note
 /// Use `Command` instead of `system()` to avoid shell injection risks.
 /// Path uses `--` argument to stop option parsing, preventing paths starting with `-` from being interpreted as options.
 pub fn open_report(path: &std::path::Path) -> anyhow::Result<()> {
     // Ensure path is absolute, avoid relative path resolution issues
-    let canonical_path = path.canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf());
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let path_str = canonical_path.to_string_lossy();
 
     #[cfg(target_os = "macos")]
@@ -465,9 +483,10 @@ pub fn ensure_reports_dir(path: &std::path::Path) -> anyhow::Result<()> {
     let latest_link = PathBuf::from("reports/latest.html");
 
     if let Err(e) = std::fs::remove_file(&latest_link)
-        && e.kind() != std::io::ErrorKind::NotFound {
-            eprintln!("   警告：删除旧符号链接失败: {}", e);
-        }
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("   警告：删除旧符号链接失败: {}", e);
+    }
 
     let path_str = path.to_string_lossy();
     let relative_path = path_str.to_string();
@@ -476,7 +495,11 @@ pub fn ensure_reports_dir(path: &std::path::Path) -> anyhow::Result<()> {
     {
         if let Err(e) = std::os::unix::fs::symlink(&relative_path, &latest_link) {
             eprintln!("   警告：创建 latest.html 符号链接失败: {}", e);
-            eprintln!("   提示：可手动创建符号链接: ln -s {} {}", relative_path, latest_link.display());
+            eprintln!(
+                "   提示：可手动创建符号链接: ln -s {} {}",
+                relative_path,
+                latest_link.display()
+            );
         }
     }
     #[cfg(windows)]

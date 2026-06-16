@@ -29,16 +29,16 @@ impl Scanner {
         // Find all .git directories (blocking IO, run in dedicated thread)
         let root_buf = root.to_path_buf();
         let source_clone = source.clone();
-        let git_dirs = tokio::task::spawn_blocking(move || {
-            Self::find_git_dirs(&root_buf, &source_clone)
-        }).await??;
+        let git_dirs =
+            tokio::task::spawn_blocking(move || Self::find_git_dirs(&root_buf, &source_clone))
+                .await??;
 
         let pb: Option<Arc<Mutex<ProgressBar>>> = if progress {
             let bar = ProgressBar::new(git_dirs.len() as u64);
             bar.set_style(
                 ProgressStyle::default_bar()
                     .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}")?
-                    .progress_chars("#>-")
+                    .progress_chars("#>-"),
             );
             Some(Arc::new(Mutex::new(bar)))
         } else {
@@ -51,7 +51,7 @@ impl Scanner {
         // - Uses blocking wait (no busy-wait)
         // - Reasonable timeout (5 seconds)
         let max_concurrent = jobs.clamp(1, 100);
-        
+
         // Build task list
         let tasks: Vec<_> = git_dirs
             .into_iter()
@@ -59,23 +59,26 @@ impl Scanner {
                 let repo_path = git_dir.parent().unwrap_or(&git_dir).to_path_buf();
                 let root_path = source.root_path.clone();
                 let pb = pb.clone();
-                
+
                 move || {
-                    let repo_name = repo_path.file_name()
+                    let repo_name = repo_path
+                        .file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default();
-                    
+
                     if let Some(ref bar) = pb
-                        && let Ok(bar) = bar.lock() {
-                            bar.set_message(format!("扫描 {}", repo_name));
-                        }
+                        && let Ok(bar) = bar.lock()
+                    {
+                        bar.set_message(format!("扫描 {}", repo_name));
+                    }
 
                     let result = GitOps::inspect(&repo_path, &root_path);
 
                     if let Some(ref bar) = pb
-                        && let Ok(bar) = bar.lock() {
-                            bar.inc(1);
-                        }
+                        && let Ok(bar) = bar.lock()
+                    {
+                        bar.inc(1);
+                    }
 
                     result.map_err(|e| e.to_string())
                 }
@@ -84,7 +87,7 @@ impl Scanner {
 
         // Execute concurrent tasks
         let results = execute_concurrent_raw(tasks, max_concurrent);
-        
+
         let mut repos = Vec::new();
         let mut errors = Vec::new();
 
@@ -97,9 +100,10 @@ impl Scanner {
         }
 
         if let Some(ref bar) = pb
-            && let Ok(bar) = bar.lock() {
-                bar.finish_with_message("扫描完成");
-            }
+            && let Ok(bar) = bar.lock()
+        {
+            bar.finish_with_message("扫描完成");
+        }
 
         // Display errors
         for err in &errors {
@@ -109,7 +113,11 @@ impl Scanner {
         // Batch write to the database serially to ensure SQLite consistency
         for repo in &mut repos {
             if let Err(e) = db.upsert_repository(repo) {
-                eprintln!("警告：保存仓库失败 '{}': {}", crate::utils::sanitize_path(&repo.path), e);
+                eprintln!(
+                    "警告：保存仓库失败 '{}': {}",
+                    crate::utils::sanitize_path(&repo.path),
+                    e
+                );
             }
         }
 
@@ -166,7 +174,10 @@ impl Scanner {
     /// 在 needauth 目录下查找从指定路径移动过来的仓库（支持重命名）
     ///
     /// 通过读取 `.needauth_original_path` sidecar 文件来匹配原始相对路径。
-    fn find_moved_repo_in_needauth(root_path: &str, original_path: &str) -> Option<std::path::PathBuf> {
+    fn find_moved_repo_in_needauth(
+        root_path: &str,
+        original_path: &str,
+    ) -> Option<std::path::PathBuf> {
         let needauth_dir = std::path::Path::new(root_path).join(crate::utils::NEEDAUTH_DIR);
         if !needauth_dir.exists() {
             return None;
@@ -202,15 +213,14 @@ impl Scanner {
     ) -> Result<()> {
         // Get all records under this root_path
         let existing = db.list_repositories()?;
-        let current_paths: std::collections::HashSet<String> = current_repos
-            .iter()
-            .map(|r| r.path.clone())
-            .collect();
+        let current_paths: std::collections::HashSet<String> =
+            current_repos.iter().map(|r| r.path.clone()).collect();
 
         for repo in existing {
             // 清理 needauth 孤儿记录：手动删除 needauth 目录后，DB 中指向不存在的 needauth 路径的记录
             // NOTE: Blocking filesystem I/O. Acceptable here because this runs in a blocking context.
-            let expected_needauth_root = std::path::Path::new(root_path).join(crate::utils::NEEDAUTH_DIR);
+            let expected_needauth_root =
+                std::path::Path::new(root_path).join(crate::utils::NEEDAUTH_DIR);
             if repo.root_path == expected_needauth_root.to_string_lossy()
                 && !std::path::Path::new(&repo.path).exists()
             {
@@ -222,21 +232,32 @@ impl Scanner {
 
             if repo.root_path == root_path && !current_paths.contains(&repo.path) {
                 // Before deleting, check if the repository was moved to needauth/
-                let needauth_path = std::path::Path::new(root_path).join(crate::utils::NEEDAUTH_DIR).join(&repo.name);
+                let needauth_path = std::path::Path::new(root_path)
+                    .join(crate::utils::NEEDAUTH_DIR)
+                    .join(&repo.name);
                 if needauth_path.exists() {
                     // Update record to new path instead of deleting
                     let mut updated = repo;
                     updated.path = needauth_path.to_string_lossy().to_string();
-                    updated.root_path = std::path::Path::new(root_path).join(crate::utils::NEEDAUTH_DIR).to_string_lossy().to_string();
+                    updated.root_path = std::path::Path::new(root_path)
+                        .join(crate::utils::NEEDAUTH_DIR)
+                        .to_string_lossy()
+                        .to_string();
                     if let Err(e) = db.upsert_repository(&mut updated) {
                         eprintln!("警告：更新已移动仓库记录失败 '{}': {}", updated.name, e);
                     }
-                } else if let Some(moved_path) = Self::find_moved_repo_in_needauth(root_path, &repo.path) {
+                } else if let Some(moved_path) =
+                    Self::find_moved_repo_in_needauth(root_path, &repo.path)
+                {
                     // 仓库被重命名后移动到 needauth，通过 sidecar 文件定位
                     let mut updated = repo;
                     updated.path = moved_path.to_string_lossy().to_string();
-                    updated.root_path = std::path::Path::new(root_path).join(crate::utils::NEEDAUTH_DIR).to_string_lossy().to_string();
-                    updated.name = moved_path.file_name()
+                    updated.root_path = std::path::Path::new(root_path)
+                        .join(crate::utils::NEEDAUTH_DIR)
+                        .to_string_lossy()
+                        .to_string();
+                    updated.name = moved_path
+                        .file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_else(|| updated.name.clone());
                     if let Err(e) = db.upsert_repository(&mut updated) {

@@ -1,264 +1,233 @@
-#!/bin/bash
-# GetLatestRepo 打包部署脚本
-# 将编译后的 Release 二进制文件移动至指定目录
+#!/bin/sh
+# GetLatestRepo 唯一打包入口。
+#
+# 设计目标：
+# - 必须支持：sh /Users/sy/local-dev-workbench/sp-pro-ai/get-latest-repo/scripts/package.sh
+# - 每次都先构建 release，确保部署的是最新源码对应的二进制。
+# - 只复制 release 产物，不移动 target/release/getlatestrepo，方便后续继续验证。
+# - 固定安装到 /Users/sy/local-bin/custom-getlatestrepo，并创建 getrep 入口。
+# - 修正 ~/.binquick 里旧的 getrep workflow alias，避免 getrep --version 被 alias 展开成 workflow 参数。
 
-set -euo pipefail
+set -eu
 
-# ═══════════════════════════════════════════════════
-# 颜色定义
-# ═══════════════════════════════════════════════════
-CLR_RESET=$'\033[0m'
-CLR_GREEN=$'\033[0;32m'
-CLR_RED=$'\033[0;31m'
-CLR_YELLOW=$'\033[0;33m'
-CLR_BLUE=$'\033[0;34m'
-CLR_CYAN=$'\033[0;36m'
-CLR_DIM=$'\033[2m'
+CLR_RESET="$(printf '\033[0m')"
+CLR_GREEN="$(printf '\033[0;32m')"
+CLR_RED="$(printf '\033[0;31m')"
+CLR_YELLOW="$(printf '\033[0;33m')"
+CLR_BLUE="$(printf '\033[0;34m')"
+CLR_CYAN="$(printf '\033[0;36m')"
+CLR_DIM="$(printf '\033[2m')"
 
-# ═══════════════════════════════════════════════════
-# 配置
-# ═══════════════════════════════════════════════════
-PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(CDPATH= cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(CDPATH= cd "${SCRIPT_DIR}/.." && pwd)"
 SOURCE_BIN="${PROJECT_ROOT}/target/release/getlatestrepo"
-TARGET_DIR="/Users/sy/local-bin"
-TARGET_BIN="${TARGET_DIR}/custom-getlatestrepo"
 
-# ═══════════════════════════════════════════════════
-# 辅助函数
-# ═══════════════════════════════════════════════════
+TARGET_DIR="${GETLATESTREPO_TARGET_DIR:-/Users/sy/local-bin}"
+TARGET_BIN="${GETLATESTREPO_TARGET_BIN:-${TARGET_DIR}/custom-getlatestrepo}"
+GETREP_DIR="${GETLATESTREPO_GETREP_DIR:-/Users/sy/.local/bin}"
+GETREP_BIN="${GETLATESTREPO_GETREP_BIN:-${GETREP_DIR}/getrep}"
+BINQUICK_FILE="${GETLATESTREPO_BINQUICK_FILE:-/Users/sy/.binquick}"
+BACKUP_KEEP="${GETLATESTREPO_BACKUP_KEEP:-5}"
+
+START_TIME="$(date +%s)"
+BACKUP_FILE=""
+
 step_start() {
-    local num="$1"
-    local total="$2"
-    local desc="$3"
-    echo ""
-    echo "${CLR_CYAN}├─ [步骤 ${num}/${total}] ${desc}${CLR_RESET}"
+    printf '\n%s├─ [%s/%s] %s%s\n' "$CLR_CYAN" "$1" "$2" "$3" "$CLR_RESET"
 }
 
 step_detail() {
-    local icon="$1"
-    local label="$2"
-    local value="$3"
-    echo "${CLR_BLUE}│  ${icon} ${label}${CLR_RESET}${CLR_DIM}: ${value}${CLR_RESET}"
+    printf '%s│  %s %s%s%s: %s%s\n' "$CLR_BLUE" "$1" "$2" "$CLR_RESET" "$CLR_DIM" "$3" "$CLR_RESET"
 }
 
 step_ok() {
-    local msg="${1:-成功}"
-    echo "${CLR_BLUE}│  ${CLR_GREEN}✓${CLR_RESET} ${CLR_DIM}状态${CLR_RESET}${CLR_DIM}: ${CLR_GREEN}${msg}${CLR_RESET}"
+    printf '%s│  %s✓%s %s%s%s\n' "$CLR_BLUE" "$CLR_GREEN" "$CLR_RESET" "$CLR_GREEN" "$1" "$CLR_RESET"
 }
 
 step_warn() {
-    local msg="$1"
-    echo "${CLR_BLUE}│  ${CLR_YELLOW}⚠${CLR_RESET} ${CLR_DIM}状态${CLR_RESET}${CLR_DIM}: ${CLR_YELLOW}${msg}${CLR_RESET}"
+    printf '%s│  %s⚠%s %s%s%s\n' "$CLR_BLUE" "$CLR_YELLOW" "$CLR_RESET" "$CLR_YELLOW" "$1" "$CLR_RESET"
 }
 
 step_err() {
-    local msg="$1"
-    echo "${CLR_BLUE}│  ${CLR_RED}✗${CLR_RESET} ${CLR_DIM}状态${CLR_RESET}${CLR_DIM}: ${CLR_RED}${msg}${CLR_RESET}"
+    printf '%s│  %s✗%s %s%s%s\n' "$CLR_BLUE" "$CLR_RED" "$CLR_RESET" "$CLR_RED" "$1" "$CLR_RESET"
 }
 
-print_banner() {
-    echo ""
-    echo "${CLR_CYAN}╔══════════════════════════════════════════════════╗${CLR_RESET}"
-    echo "${CLR_CYAN}║${CLR_RESET}     ${CLR_YELLOW}GetLatestRepo 打包部署脚本${CLR_RESET}              ${CLR_CYAN}║${CLR_RESET}"
-    echo "${CLR_CYAN}╚══════════════════════════════════════════════════╝${CLR_RESET}"
-    echo ""
-    echo "${CLR_YELLOW}📦 打包流程开始${CLR_RESET}"
-}
-
-print_summary() {
-    local result="$1"
-    local elapsed="$2"
-    local size="$3"
-    local version_info="$4"
-
-    echo ""
-    echo "${CLR_CYAN}└─${CLR_RESET} ${CLR_YELLOW}📊 打包总结${CLR_RESET}"
-    echo "   ${CLR_BLUE}├─${CLR_RESET} ${CLR_DIM}版本信息${CLR_RESET}${CLR_DIM}: ${version_info}${CLR_RESET}"
-    echo "   ${CLR_BLUE}├─${CLR_RESET} ${CLR_DIM}文件大小${CLR_RESET}${CLR_DIM}: ${size}${CLR_RESET}"
-    echo "   ${CLR_BLUE}├─${CLR_RESET} ${CLR_DIM}总耗时${CLR_RESET}${CLR_DIM}: ${elapsed}${CLR_RESET}"
-    if [ "$result" = "ok" ]; then
-        echo "   ${CLR_BLUE}└─${CLR_RESET} ${CLR_DIM}结果${CLR_RESET}${CLR_DIM}: ${CLR_GREEN}✓ 全部成功${CLR_RESET}"
-    else
-        echo "   ${CLR_BLUE}└─${CLR_RESET} ${CLR_DIM}结果${CLR_RESET}${CLR_DIM}: ${CLR_RED}✗ 部分失败${CLR_RESET}"
-    fi
-    echo ""
+die() {
+    step_err "$1"
+    printf '%s✗ 打包失败%s\n' "$CLR_RED" "$CLR_RESET"
+    exit 1
 }
 
 format_duration() {
-    local secs="$1"
-    if (( secs < 60 )); then
-        echo "${secs}s"
+    secs="$1"
+    if [ "$secs" -lt 60 ]; then
+        printf '%ss' "$secs"
     else
-        local m=$(( secs / 60 ))
-        local s=$(( secs % 60 ))
-        echo "${m}m ${s}s"
+        printf '%sm %ss' "$((secs / 60))" "$((secs % 60))"
     fi
 }
 
-# ═══════════════════════════════════════════════════
-# 主流程
-# ═══════════════════════════════════════════════════
-main() {
-    local START_TIME=$(date +%s)
-    local RESULT="ok"
-    local VERSION_INFO="unknown"
-    local FILE_SIZE="unknown"
-    local BACKUP_FILE=""
-
-    print_banner
-
-    # ───────────────────────────────────────────────
-    # 步骤 1: 编译 Release 版本
-    # ───────────────────────────────────────────────
-    step_start "1" "3" "编译 Release 版本"
-    step_detail "📁" "工作目录" "${PROJECT_ROOT}"
-    step_detail "🔧" "编译命令" "cargo build --release"
-
-    cd "${PROJECT_ROOT}"
-
-    if ! cargo build --release 2>&1 | while IFS= read -r line; do
-        echo "${CLR_DIM}│  │  ${line}${CLR_RESET}"
-    done; then
-        step_err "编译失败"
-        RESULT="fail"
-        local END_TIME=$(date +%s)
-        local ELAPSED=$(( END_TIME - START_TIME ))
-        print_summary "${RESULT}" "$(format_duration ${ELAPSED})" "${FILE_SIZE}" "${VERSION_INFO}"
-        echo "${CLR_RED}✗ 打包失败：编译阶段出错${CLR_RESET}"
-        exit 1
+file_size() {
+    if command -v stat >/dev/null 2>&1; then
+        stat -f '%z bytes' "$1" 2>/dev/null && return 0
+        stat -c '%s bytes' "$1" 2>/dev/null && return 0
     fi
-
-    # 验证二进制文件
-    if [ ! -f "${SOURCE_BIN}" ]; then
-        step_err "找不到编译产物: ${SOURCE_BIN}"
-        RESULT="fail"
-        local END_TIME=$(date +%s)
-        local ELAPSED=$(( END_TIME - START_TIME ))
-        print_summary "${RESULT}" "$(format_duration ${ELAPSED})" "${FILE_SIZE}" "${VERSION_INFO}"
-        echo "${CLR_RED}✗ 打包失败：编译产物缺失${CLR_RESET}"
-        exit 1
-    fi
-
-    FILE_SIZE=$(ls -lh "${SOURCE_BIN}" | awk '{print $5}')
-    step_ok "编译成功"
-
-    # ───────────────────────────────────────────────
-    # 步骤 2: 准备目标目录
-    # ───────────────────────────────────────────────
-    step_start "2" "3" "准备目标目录"
-    step_detail "📁" "目标目录" "${TARGET_DIR}"
-
-    if [ ! -d "${TARGET_DIR}" ]; then
-        step_detail "🔧" "操作" "创建目录 ${TARGET_DIR}"
-        if mkdir -p "${TARGET_DIR}" 2>/dev/null; then
-            step_ok "目录创建成功"
-        else
-            step_err "无法创建目录 ${TARGET_DIR}"
-            RESULT="fail"
-            local END_TIME=$(date +%s)
-            local ELAPSED=$(( END_TIME - START_TIME ))
-            print_summary "${RESULT}" "$(format_duration ${ELAPSED})" "${FILE_SIZE}" "${VERSION_INFO}"
-            echo "${CLR_RED}✗ 打包失败：无法创建目标目录${CLR_RESET}"
-            exit 1
-        fi
-    else
-        step_detail "📋" "目录状态" "已存在"
-    fi
-
-    # 备份原有文件
-    if [ -f "${TARGET_BIN}" ]; then
-        local TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-        BACKUP_FILE="${TARGET_BIN}.bak.${TIMESTAMP}"
-        if cp "${TARGET_BIN}" "${BACKUP_FILE}" 2>/dev/null; then
-            step_detail "💾" "备份操作" "getlatestrepo → getlatestrepo.bak.${TIMESTAMP}"
-            step_ok "备份成功"
-        else
-            step_warn "备份失败（可能无权限），继续执行..."
-        fi
-    else
-        step_detail "📋" "原有文件" "不存在，无需备份"
-    fi
-
-    # ───────────────────────────────────────────────
-    # 步骤 3: 替换二进制文件
-    # ───────────────────────────────────────────────
-    step_start "3" "3" "替换二进制文件"
-    step_detail "📄" "源文件" "target/release/getlatestrepo (${FILE_SIZE})"
-    step_detail "🎯" "目标文件" "${TARGET_BIN}"
-
-    # 获取版本信息（从 Cargo.toml 读取，避免进程锁冲突）
-    VERSION_INFO="v$(grep '^version' "${PROJECT_ROOT}/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')" || VERSION_INFO="unknown"
-
-    if mv "${SOURCE_BIN}" "${TARGET_BIN}" 2>/dev/null; then
-        chmod +x "${TARGET_BIN}"
-        step_ok "替换成功"
-    else
-        step_err "移动文件失败"
-        # 尝试恢复备份
-        if [ -n "${BACKUP_FILE}" ] && [ -f "${BACKUP_FILE}" ]; then
-            step_detail "🔄" "恢复操作" "从备份恢复..."
-            cp "${BACKUP_FILE}" "${TARGET_BIN}" 2>/dev/null || true
-        fi
-        RESULT="fail"
-        local END_TIME=$(date +%s)
-        local ELAPSED=$(( END_TIME - START_TIME ))
-        print_summary "${RESULT}" "$(format_duration ${ELAPSED})" "${FILE_SIZE}" "${VERSION_INFO}"
-        echo "${CLR_RED}✗ 打包失败：文件替换出错${CLR_RESET}"
-        exit 1
-    fi
-
-    # ───────────────────────────────────────────────
-    # 验证
-    # ───────────────────────────────────────────────
-    step_detail "🔍" "验证" "执行 ${TARGET_BIN} --version"
-    local VERIFY_OUTPUT
-    VERIFY_OUTPUT=$("${TARGET_BIN}" --version 2>&1) || true
-    if echo "${VERIFY_OUTPUT}" | grep -q 'getlatestrepo'; then
-        step_detail "📋" "版本输出" "${VERIFY_OUTPUT}"
-        step_ok "验证通过"
-    elif echo "${VERIFY_OUTPUT}" | grep -q 'already running'; then
-        step_detail "📋" "版本输出" "${VERIFY_OUTPUT}"
-        step_warn "进程锁冲突，跳过版本验证"
-    else
-        step_warn "版本验证未返回预期输出"
-    fi
-
-    # ───────────────────────────────────────────────
-    # 清理旧备份（保留最近 5 个）
-    # ───────────────────────────────────────────────
-    local BACKUP_COUNT
-    BACKUP_COUNT=$(find "${TARGET_DIR}" -maxdepth 1 -name 'getlatestrepo.bak.*' -type f 2>/dev/null | wc -l | tr -d ' ')
-    if [ "${BACKUP_COUNT}" -gt 5 ]; then
-        find "${TARGET_DIR}" -maxdepth 1 -name 'getlatestrepo.bak.*' -type f -printf '%T@ %p\n' 2>/dev/null | \
-            sort -n | head -n -5 | cut -d' ' -f2- | \
-            while IFS= read -r oldbak; do
-                rm -f "${oldbak}" 2>/dev/null || true
-            done
-        step_detail "🧹" "清理旧备份" "保留最近 5 个备份，删除 ${BACKUP_COUNT} 个旧备份"
-    fi
-
-    # ───────────────────────────────────────────────
-    # 总结
-    # ───────────────────────────────────────────────
-    local END_TIME=$(date +%s)
-    local ELAPSED=$(( END_TIME - START_TIME ))
-
-    print_summary "${RESULT}" "$(format_duration ${ELAPSED})" "${FILE_SIZE}" "${VERSION_INFO}"
-
-    if [ "${RESULT}" = "ok" ]; then
-        echo "${CLR_GREEN}✓ 打包完成！${CLR_RESET}"
-        echo ""
-        echo "${CLR_DIM}部署路径${CLR_RESET}: ${CLR_CYAN}${TARGET_BIN}${CLR_RESET}"
-        echo "${CLR_DIM}版本信息${CLR_RESET}: ${CLR_CYAN}${VERSION_INFO}${CLR_RESET}"
-        echo "${CLR_DIM}备份文件${CLR_RESET}: ${CLR_CYAN}${BACKUP_FILE:-无}${CLR_RESET}"
-        exit 0
-    else
-        echo "${CLR_RED}✗ 打包失败！${CLR_RESET}"
-        exit 1
-    fi
+    wc -c <"$1" | awk '{print $1 " bytes"}'
 }
 
-# ═══════════════════════════════════════════════════
-# 入口
-# ═══════════════════════════════════════════════════
-main "$@"
+cargo_version() {
+    awk -F '"' '/^version[[:space:]]*=/ { print $2; exit }' "${PROJECT_ROOT}/Cargo.toml"
+}
+
+quote_for_single_alias() {
+    # 当前部署路径不包含单引号；这里仍保留校验，避免生成无法 source 的 alias。
+    case "$1" in
+        *"'"*) return 1 ;;
+        *) printf "%s" "$1" ;;
+    esac
+}
+
+fix_binquick_alias() {
+    [ -n "$BINQUICK_FILE" ] || return 0
+
+    alias_target="$(quote_for_single_alias "$TARGET_BIN")" || {
+        step_warn "部署路径包含单引号，跳过 ~/.binquick alias 修复"
+        return 0
+    }
+    alias_line="alias getrep='${alias_target}'"
+
+    if [ ! -e "$BINQUICK_FILE" ]; then
+        step_detail "🧩" "快捷文件" "创建 ${BINQUICK_FILE}"
+        {
+            printf '# GetLatestRepo 快捷入口\n'
+            printf '%s\n' "$alias_line"
+        } >"$BINQUICK_FILE" || die "无法创建 ${BINQUICK_FILE}"
+        chmod 600 "$BINQUICK_FILE" 2>/dev/null || true
+        step_ok "已创建 getrep alias"
+        return 0
+    fi
+
+    if [ ! -f "$BINQUICK_FILE" ]; then
+        step_warn "${BINQUICK_FILE} 不是普通文件，跳过 alias 修复"
+        return 0
+    fi
+
+    stamp="$(date +%Y%m%d-%H%M%S)"
+    binquick_backup="${BINQUICK_FILE}.bak.${stamp}"
+    cp "$BINQUICK_FILE" "$binquick_backup" 2>/dev/null || die "无法备份 ${BINQUICK_FILE}"
+
+    tmp_file="${BINQUICK_FILE}.tmp.$$"
+    awk -v alias_line="$alias_line" '
+        BEGIN { replaced = 0 }
+        /^[[:space:]]*alias[[:space:]]+getrep=/ {
+            if (replaced == 0) {
+                print alias_line
+                replaced = 1
+            }
+            next
+        }
+        { print }
+        END {
+            if (replaced == 0) {
+                print ""
+                print "# --- getlatestrepo ---"
+                print alias_line
+            }
+        }
+    ' "$BINQUICK_FILE" >"$tmp_file" || {
+        rm -f "$tmp_file"
+        die "无法更新 ${BINQUICK_FILE}"
+    }
+
+    mv "$tmp_file" "$BINQUICK_FILE" || die "无法替换 ${BINQUICK_FILE}"
+    chmod 600 "$BINQUICK_FILE" 2>/dev/null || true
+    step_detail "🧩" "快捷入口" "${BINQUICK_FILE}: ${alias_line}"
+    step_detail "💾" "快捷备份" "$binquick_backup"
+    step_ok "已修正 getrep alias"
+}
+
+cleanup_old_backups() {
+    [ "$BACKUP_KEEP" -ge 0 ] 2>/dev/null || BACKUP_KEEP=5
+    [ -d "$TARGET_DIR" ] || return 0
+
+    # macOS 默认 find 没有 -printf；这里用 ls -t 做保留最近 N 个的兼容清理。
+    set +e
+    old_list="$(ls -t "${TARGET_BIN}.bak."* 2>/dev/null | awk -v keep="$BACKUP_KEEP" 'NR > keep { print }')"
+    set -e
+    [ -n "$old_list" ] || return 0
+
+    printf '%s\n' "$old_list" | while IFS= read -r old_backup; do
+        [ -n "$old_backup" ] && rm -f "$old_backup" 2>/dev/null || true
+    done
+    step_ok "已清理旧二进制备份"
+}
+
+printf '\n%s╔══════════════════════════════════════════════════╗%s\n' "$CLR_CYAN" "$CLR_RESET"
+printf '%s║%s     %sGetLatestRepo 打包部署脚本%s              %s║%s\n' "$CLR_CYAN" "$CLR_RESET" "$CLR_YELLOW" "$CLR_RESET" "$CLR_CYAN" "$CLR_RESET"
+printf '%s╚══════════════════════════════════════════════════╝%s\n\n' "$CLR_CYAN" "$CLR_RESET"
+
+step_start 1 6 "构建最新 Release 二进制"
+step_detail "📁" "项目目录" "$PROJECT_ROOT"
+step_detail "🔧" "构建命令" "cargo build --release"
+cd "$PROJECT_ROOT"
+cargo build --release || die "cargo build --release 失败"
+[ -f "$SOURCE_BIN" ] || die "找不到构建产物 ${SOURCE_BIN}"
+FILE_SIZE="$(file_size "$SOURCE_BIN")"
+VERSION_INFO="v$(cargo_version)"
+step_detail "📦" "构建产物" "${SOURCE_BIN} (${FILE_SIZE})"
+step_ok "构建完成"
+
+step_start 2 6 "准备安装目录"
+mkdir -p "$TARGET_DIR" "$GETREP_DIR" || die "无法创建安装目录"
+step_detail "📁" "二进制目录" "$TARGET_DIR"
+step_detail "📁" "getrep 目录" "$GETREP_DIR"
+step_ok "目录就绪"
+
+step_start 3 6 "备份旧二进制"
+if [ -f "$TARGET_BIN" ]; then
+    stamp="$(date +%Y%m%d-%H%M%S)"
+    BACKUP_FILE="${TARGET_BIN}.bak.${stamp}"
+    cp "$TARGET_BIN" "$BACKUP_FILE" || die "无法备份旧二进制"
+    step_detail "💾" "备份文件" "$BACKUP_FILE"
+    step_ok "备份完成"
+else
+    step_detail "📋" "旧二进制" "不存在，无需备份"
+    step_ok "跳过备份"
+fi
+
+step_start 4 6 "安装最新二进制"
+tmp_target="${TARGET_BIN}.tmp.$$"
+cp "$SOURCE_BIN" "$tmp_target" || die "复制新二进制失败"
+chmod +x "$tmp_target" || die "设置执行权限失败"
+mv "$tmp_target" "$TARGET_BIN" || die "替换目标二进制失败"
+step_detail "🎯" "部署路径" "$TARGET_BIN"
+step_ok "二进制已安装"
+
+step_start 5 6 "创建 getrep 命令入口"
+ln -sfn "$TARGET_BIN" "$GETREP_BIN" || die "创建 getrep 软链接失败"
+step_detail "🔗" "软链接" "${GETREP_BIN} -> ${TARGET_BIN}"
+fix_binquick_alias
+step_ok "getrep 入口已就绪"
+
+step_start 6 6 "验证安装结果"
+version_output="$("$TARGET_BIN" --version 2>&1)" || die "目标二进制 --version 验证失败"
+printf '%s\n' "$version_output" | grep 'getlatestrepo' >/dev/null || die "版本输出不符合预期: ${version_output}"
+help_output="$("$GETREP_BIN" --help 2>&1)" || die "getrep --help 验证失败"
+printf '%s\n' "$help_output" | grep 'tui' >/dev/null || die "getrep --help 未包含 tui 命令"
+step_detail "📋" "版本输出" "$version_output"
+step_detail "📋" "TUI 检查" "getrep --help 包含 tui"
+cleanup_old_backups
+step_ok "验证通过"
+
+END_TIME="$(date +%s)"
+ELAPSED="$((END_TIME - START_TIME))"
+
+printf '\n%s└─%s %s打包完成%s\n' "$CLR_CYAN" "$CLR_RESET" "$CLR_GREEN" "$CLR_RESET"
+printf '   %s├─%s %s版本%s: %s%s%s\n' "$CLR_BLUE" "$CLR_RESET" "$CLR_DIM" "$CLR_RESET" "$CLR_CYAN" "$VERSION_INFO" "$CLR_RESET"
+printf '   %s├─%s %s二进制%s: %s%s%s\n' "$CLR_BLUE" "$CLR_RESET" "$CLR_DIM" "$CLR_RESET" "$CLR_CYAN" "$TARGET_BIN" "$CLR_RESET"
+printf '   %s├─%s %s命令入口%s: %s%s%s\n' "$CLR_BLUE" "$CLR_RESET" "$CLR_DIM" "$CLR_RESET" "$CLR_CYAN" "$GETREP_BIN" "$CLR_RESET"
+printf '   %s├─%s %s备份文件%s: %s%s%s\n' "$CLR_BLUE" "$CLR_RESET" "$CLR_DIM" "$CLR_RESET" "$CLR_CYAN" "${BACKUP_FILE:-无}" "$CLR_RESET"
+printf '   %s└─%s %s耗时%s: %s%s%s\n\n' "$CLR_BLUE" "$CLR_RESET" "$CLR_DIM" "$CLR_RESET" "$CLR_CYAN" "$(format_duration "$ELAPSED")" "$CLR_RESET"
+
+printf '%s当前终端如果已经加载过旧 alias，请执行：source %s%s\n' "$CLR_YELLOW" "$BINQUICK_FILE" "$CLR_RESET"
+printf '%s之后固定使用：getrep --version / getrep tui / getrep workflow pull-backup%s\n' "$CLR_GREEN" "$CLR_RESET"
