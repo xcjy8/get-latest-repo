@@ -113,7 +113,7 @@ pub enum Commands {
         #[arg(short, long)]
         timeout: Option<u64>,
 
-        /// pull 后显示新增提交（仅对 pull-safe/pull-force 有效）
+        /// pull 后显示新增提交（仅对 pull-safe/pull-force/pull-backup 有效）
         #[arg(long)]
         diff_after: bool,
 

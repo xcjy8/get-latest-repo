@@ -15,13 +15,12 @@ mod sync;
 mod utils;
 mod workflow;
 
-
-use anyhow::{Result, Context};
-use clap::Parser;
 use crate::cli::{Cli, Commands};
 use crate::config::AppConfig;
 use crate::db::Database;
 use crate::git::ProxyConfig;
+use anyhow::{Context, Result};
+use clap::Parser;
 use std::fs::File;
 
 /// Process lock file; automatically cleaned up on Drop
@@ -40,7 +39,11 @@ impl Drop for ProcessLock {
             if let Ok(pid) = content.trim().parse::<u32>() {
                 if pid == std::process::id() {
                     if let Err(e) = std::fs::remove_file(&self.pid_path) {
-                        eprintln!("警告：无法清理 PID 文件 '{}': {}", self.pid_path.display(), e);
+                        eprintln!(
+                            "警告：无法清理 PID 文件 '{}': {}",
+                            self.pid_path.display(),
+                            e
+                        );
                     }
                 }
             }
@@ -60,15 +63,15 @@ fn acquire_process_lock() -> Result<ProcessLock> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("无法创建锁文件目录: {:?}", parent))?;
     }
-    
+
     #[cfg(unix)]
     {
+        use libc::{LOCK_EX, LOCK_NB, flock};
         use std::os::unix::io::AsRawFd;
-        use libc::{flock, LOCK_EX, LOCK_NB};
-        
-        let file = File::create(&lock_path)
-            .with_context(|| format!("无法创建锁文件: {:?}", lock_path))?;
-        
+
+        let file =
+            File::create(&lock_path).with_context(|| format!("无法创建锁文件: {:?}", lock_path))?;
+
         let fd = file.as_raw_fd();
         // SAFETY: `fd` is a valid file descriptor obtained from `File::create` above.
         // `flock` is a POSIX system call that operates on file descriptors atomically.
@@ -76,14 +79,14 @@ fn acquire_process_lock() -> Result<ProcessLock> {
         // held by another process, it returns -1 with errno=EWOULDBLOCK, which we handle below.
         // No undefined behavior can occur from this call.
         let result = unsafe { flock(fd, LOCK_EX | LOCK_NB) };
-        
+
         if result != 0 {
             anyhow::bail!("另一个 getlatestrepo 实例正在运行，无法并发执行");
         }
-        
+
         Ok(ProcessLock { _file: file })
     }
-    
+
     #[cfg(not(unix))]
     {
         // Windows: atomic PID file creation with stale-lock recovery
@@ -181,48 +184,59 @@ async fn main() -> Result<std::process::ExitCode> {
     // Initialize signal handling for Ctrl+C
     signal_handler::init();
 
-    // Prevent duplicate execution via file lock
-    let _lock = acquire_process_lock()?;
-
+    // 先解析 CLI，再获取进程锁。`--help` 和 `--version` 属于 clap 的早退出路径，
+    // 不应因为缓存目录不可写、已有实例运行或启动自检失败而无法显示基础信息。
     let cli = Cli::parse();
     let no_security_check = cli.no_security_check;
     let auto_skip_high_risk = cli.auto_skip_high_risk;
 
-    // 启动自检：修复路径不一致的记录，清理过期的临时文件
+    // 真正会读写配置、数据库或仓库状态的命令才需要进程锁，防止多个实例并发
+    // fetch / scan / pull 时互相覆盖数据库记录或工作区状态。
+    let _lock = acquire_process_lock()?;
+
+    // 启动自检：修复路径不一致的记录，清理过期的临时文件。日志中带上
+    // 编译期版本号，方便用户确认当前 alias 或安装路径是否已经切到新二进制。
     if !matches!(cli.command, Commands::Init { .. })
-        && let Err(e) = run_startup_cleanup() {
-            eprintln!("⚠️  启动自检失败: {e}");
-        }
+        && let Err(e) = run_startup_cleanup()
+    {
+        eprintln!("⚠️  启动自检失败（v{}）: {e}", app_version());
+    }
 
     // Build proxy config
     let proxy_config = build_proxy_config(cli.proxy, cli.proxy_url);
 
     let exit_code = match cli.command {
-        Commands::Init { path } => {
-            commands::init::execute(path).await.map(|_| 0)
-        }
+        Commands::Init { path } => commands::init::execute(path).await.map(|_| 0),
         Commands::Scan {
             fetch,
             output,
             out,
             depth,
             jobs,
-        } => {
-            commands::scan::execute(fetch, output, out, depth, validate_jobs(jobs), no_security_check, auto_skip_high_risk)
-                .await
-                .map(|_| 0)
-        }
-        Commands::Fetch { jobs, timeout } => {
-            commands::fetch::execute(validate_jobs(jobs), timeout, no_security_check, auto_skip_high_risk, proxy_config)
-                .await
-                .map(|_| 0)
-        }
-        Commands::Status { path, diff, issues } => {
-            commands::status::execute(path, diff, issues).await.map(|_| 0)
-        }
-        Commands::Config { command } => {
-            commands::config::execute(command).await.map(|_| 0)
-        }
+        } => commands::scan::execute(
+            fetch,
+            output,
+            out,
+            depth,
+            validate_jobs(jobs),
+            no_security_check,
+            auto_skip_high_risk,
+        )
+        .await
+        .map(|_| 0),
+        Commands::Fetch { jobs, timeout } => commands::fetch::execute(
+            validate_jobs(jobs),
+            timeout,
+            no_security_check,
+            auto_skip_high_risk,
+            proxy_config,
+        )
+        .await
+        .map(|_| 0),
+        Commands::Status { path, diff, issues } => commands::status::execute(path, diff, issues)
+            .await
+            .map(|_| 0),
+        Commands::Config { command } => commands::config::execute(command).await.map(|_| 0),
         Commands::Workflow {
             name,
             list,
@@ -250,9 +264,7 @@ async fn main() -> Result<std::process::ExitCode> {
             )
             .await
         }
-        Commands::Discard { path, yes } => {
-            commands::discard::execute(path, yes).await.map(|_| 0)
-        }
+        Commands::Discard { path, yes } => commands::discard::execute(path, yes).await.map(|_| 0),
     }?;
 
     // 若收到关闭请求，立即退出，不等待 tokio runtime 清理后台线程
@@ -302,7 +314,10 @@ fn run_startup_cleanup() -> Result<usize> {
     }
 
     if fixes > 0 {
-        eprintln!("ℹ️  启动自检完成，已修复 {fixes} 条记录");
+        eprintln!(
+            "ℹ️  启动自检完成（v{}），已修复 {fixes} 条记录",
+            app_version()
+        );
     }
 
     // 清理 needauth/ 下过期的 swap 临时目录
@@ -332,17 +347,31 @@ fn run_startup_cleanup() -> Result<usize> {
     Ok(fixes)
 }
 
+/// 返回当前二进制的编译期版本号。
+///
+/// `env!("CARGO_PKG_VERSION")` 来自 Cargo 包元数据，能保证 `--version`、启动自检
+/// 日志和 release tag 使用同一份版本来源，避免 alias 指向旧二进制时用户无法察觉。
+fn app_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
 /// Build proxy configuration
 /// Validate and limit concurrency
 fn validate_jobs(jobs: usize) -> usize {
     const MAX_JOBS: usize = 100;
     const MIN_JOBS: usize = 1;
-    
+
     if jobs > MAX_JOBS {
-        eprintln!("警告：并发数 {} 超过最大限制 {}，已调整为 {}", jobs, MAX_JOBS, MAX_JOBS);
+        eprintln!(
+            "警告：并发数 {} 超过最大限制 {}，已调整为 {}",
+            jobs, MAX_JOBS, MAX_JOBS
+        );
         MAX_JOBS
     } else if jobs < MIN_JOBS {
-        eprintln!("警告：并发数 {} 低于最小限制 {}，已调整为 {}", jobs, MIN_JOBS, MIN_JOBS);
+        eprintln!(
+            "警告：并发数 {} 低于最小限制 {}，已调整为 {}",
+            jobs, MIN_JOBS, MIN_JOBS
+        );
         MIN_JOBS
     } else {
         jobs

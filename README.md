@@ -1,135 +1,118 @@
-<div align="center">
-
 # GetLatestRepo
 
-[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange?logo=rust)](https://www.rust-lang.org)
-[![CI](https://github.com/xcjy8/GetLatestRepo/actions/workflows/ci.yml/badge.svg)](https://github.com/xcjy8/GetLatestRepo/actions)
-[![License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+GetLatestRepo 是一个本地 Git 仓库批量管理工具，适合同时维护几十到几百个仓库的人使用。
 
-**Rust 编写的高性能本地 Git 仓库批量管理工具**
-
-[English](README.en.md)
-
-</div>
+它可以递归扫描目录下的 Git 仓库，并发获取远程状态，找出落后、脏工作区、远程不可达、认证异常等问题；也可以按不同策略批量同步仓库，并生成终端、HTML 或 Markdown 报告。
 
 ---
 
-## 为什么需要 GetLatestRepo？
-
-如果你同时维护着几十甚至上百个 Git 仓库，以下场景一定不陌生：
-
-- 每天早上逐个 `cd` 进目录、`git fetch`、`git pull`，重复操作浪费时间
-- 不确定哪些仓库有本地未提交的修改，贸然 pull 可能引发冲突
-- 想要一份全局的仓库状态报告，却只能手动汇总
-- CI/CD 流水线需要检测所有仓库是否与远程同步，缺少现成工具
-
-**GetLatestRepo 就是为了解决这些问题而生的。** 一条命令扫描所有仓库、并发 fetch、安全拉取、生成可视化报告，把重复劳动变成自动化工作流。
-
----
-
-## 核心功能
+## 核心特色
 
 | 能力 | 说明 |
 |------|------|
-| **递归扫描** | 秒级发现指定目录下所有 Git 仓库，SQLite 缓存避免重复扫描 |
-| **并发 Fetch** | 基于 Tokio 异步并发，可配置并发数与超时，支持代理 |
-| **安全拉取** | `pull-safe` 自动跳过有本地修改的仓库；`pull-force` 自动 stash → pull → pop |
-| **备份同步** | `pull-backup` 硬重置到远程最新状态，适合纯备份场景 |
-| **安全扫描** | fetch 后、pull 前检查远程差异：检测敏感文件变更、可疑代码模式、未知提交者 |
-| **工作流引擎** | 内置 7 种工作流，串联 fetch → scan → pull → report 全流程 |
-| **多格式报告** | 终端表格 / HTML（暗色主题）/ Markdown，自动按日期归档 |
-| **进程锁** | 防止多实例并发运行导致数据竞争 |
+| 批量扫描 | 从一个或多个根目录递归发现 Git 仓库，并记录到本地数据库 |
+| 并发 fetch | 同时检查多个仓库远程状态，可设置并发数、超时和代理 |
+| 状态汇总 | 展示仓库是否干净、是否落后远程、是否有本地修改、远程是否可访问 |
+| 安全拉取 | `pull-safe` 只更新干净仓库，自动跳过有本地修改的仓库 |
+| 强制拉取 | `pull-force` 自动 stash 本地修改，再 pull，最后尝试恢复 stash |
+| 备份同步 | `pull-backup` 面向纯备份仓库，硬重置到远程状态，并在可能丢失本地历史前创建归档引用 |
+| 远程提交留存 | fetch 前后归档远程跟踪分支 HEAD，尽量保留曾经 fetch 到的远程分支提交 |
+| 风险扫描 | fetch 前、pull/reset 前检查敏感文件、可疑代码、未知提交者等高风险变化 |
+| 认证隔离 | 认证失败或远程不存在的仓库会移动到 `needauth/`，避免反复阻塞正常仓库 |
+| 多格式报告 | 支持终端表格、HTML、Markdown，报告按日期归档 |
+| 启动自检 | 启动时修复部分路径记录，清理残留临时目录，并在日志中显示当前版本号 |
 
 ---
 
-## 截图
+## 基本使用流程
 
-<p align="center">
-  <img src="docs/images/01.jpg" alt="终端表格报告" width="80%">
-</p>
-
-<p align="center">
-  <img src="docs/images/02.jpg" alt="HTML 暗色主题报告" width="80%">
-</p>
-
-<p align="center">
-  <img src="docs/images/03.jpg" alt="工作流执行" width="80%">
-</p>
-
----
-
-## 安装
-
-### 从源码编译
+### 1. 添加要管理的目录
 
 ```bash
-git clone https://github.com/xcjy8/GetLatestRepo.git
-cd GetLatestRepo
-cargo build --release
-
-# 可选：安装到系统路径
-sudo cp target/release/getlatestrepo /usr/local/bin/
-```
-
-### 环境要求
-
-- Rust 1.85+（使用 Rust Edition 2024）
-- Git（系统已安装）
-
-### 从 Release 下载
-
-前往 [GitHub Releases](https://github.com/xcjy8/GetLatestRepo/releases) 下载预编译二进制。
-
----
-
-## 快速开始
-
-```bash
-# 1. 添加扫描目录
 getlatestrepo init ~/projects
-
-# 2. 运行日常工作流（fetch + scan + 状态汇总）
-getlatestrepo workflow daily
-
-# 3. 生成 HTML 报告并自动打开浏览器
-getlatestrepo workflow report
 ```
 
-三步即可完成：添加目录 → 执行工作流 → 查看报告。
+该命令会把 `~/projects` 加入扫描源。以后执行 scan、fetch、workflow 时，会在这个目录下递归查找 Git 仓库。
+
+### 2. 日常检查所有仓库
+
+```bash
+getlatestrepo workflow daily
+```
+
+这个工作流会先 fetch，再扫描并在终端输出所有仓库状态。
+
+### 3. 只看需要处理的问题
+
+```bash
+getlatestrepo workflow check
+```
+
+这个工作流不 fetch，只根据本地数据库和当前工作区状态显示需要关注的仓库。
+
+### 4. 批量同步纯备份仓库
+
+```bash
+getlatestrepo workflow pull-backup
+```
+
+该模式适合“本地只做镜像备份，不保留手工改动”的仓库集合。它会尽量让本地分支匹配远程跟踪分支。
 
 ---
 
-## 命令详解
+## 全局参数
 
-### 全局参数
+全局参数可以放在任意子命令前后。
 
 | 参数 | 说明 |
 |------|------|
 | `--proxy` | 启用默认代理 `http://127.0.0.1:7890` |
-| `--proxy-url <URL>` | 指定自定义代理地址 |
-| `--no-security-check` | 禁用预操作安全扫描 |
+| `--proxy-url <URL>` | 使用指定代理，例如 `http://127.0.0.1:1080` |
+| `--no-security-check` | 禁用 pull/reset 前的远程差异安全扫描 |
+| `--auto-skip-high-risk` | 自动跳过高风险仓库，不进入交互确认 |
 
-### 命令一览
+示例：
 
-| 命令 | 说明 |
+```bash
+getlatestrepo --proxy workflow daily
+getlatestrepo --proxy-url http://127.0.0.1:1080 fetch
+getlatestrepo --auto-skip-high-risk workflow pull-backup
+```
+
+---
+
+## 命令一览
+
+| 命令 | 用途 |
 |------|------|
-| `init <path>` | 添加扫描目录 |
-| `scan` | 递归扫描所有 Git 仓库 |
-| `fetch` | 并发 fetch 所有仓库 |
-| `status <path>` | 查看单个仓库详细状态 |
-| `config` | 管理扫描源、忽略规则、配置 |
-| `workflow <name>` | 执行工作流 |
-| `discard` | 交互式丢弃本地修改 |
+| `init <PATH>` | 添加扫描源 |
+| `scan` | 扫描仓库并输出报告 |
+| `fetch` | 并发 fetch 已记录的仓库 |
+| `status [PATH]` | 查看单个仓库状态，或用 `--issues` 查看异常仓库 |
+| `config` | 管理扫描源、忽略规则和配置路径 |
+| `workflow [NAME]` | 执行内置工作流 |
+| `discard [PATH]` | 丢弃本地修改 |
 
-### `init`
+---
+
+## init：添加扫描源
 
 ```bash
 getlatestrepo init <PATH>
 ```
 
-将指定目录添加为扫描源，后续 scan/fetch 操作会递归发现该目录下的所有 Git 仓库。
+示例：
 
-### `scan`
+```bash
+getlatestrepo init ~/work
+getlatestrepo init /Volumes/repos
+```
+
+首次使用时建议先执行 `init`。后续可通过 `config add` 添加更多扫描源。
+
+---
+
+## scan：扫描并生成报告
 
 ```bash
 getlatestrepo scan [OPTIONS]
@@ -137,13 +120,28 @@ getlatestrepo scan [OPTIONS]
 
 | 参数 | 说明 |
 |------|------|
-| `--fetch` | 扫描前先执行 fetch |
-| `-o, --output <FORMAT>` | 输出格式：`terminal`（默认）、`html`、`markdown` |
-| `--out <PATH>` | 自定义输出文件路径 |
-| `-d, --depth <N>` | 限制扫描深度 |
-| `-j, --jobs <N>` | 并发数（默认 5） |
+| `--fetch` | 扫描前先 fetch |
+| `-o, --output <FORMAT>` | 输出格式：`terminal`、`html`、`markdown` |
+| `--out <PATH>` | 指定报告输出路径 |
+| `-d, --depth <N>` | 限制递归扫描深度 |
+| `-j, --jobs <N>` | 并发数，默认 `5` |
 
-### `fetch`
+示例：
+
+```bash
+# 终端输出扫描结果
+getlatestrepo scan
+
+# 先 fetch，再生成 HTML 报告
+getlatestrepo scan --fetch --output html
+
+# 只扫描较浅目录，适合目录树很大的情况
+getlatestrepo scan --depth 3
+```
+
+---
+
+## fetch：并发获取远程状态
 
 ```bash
 getlatestrepo fetch [OPTIONS]
@@ -151,20 +149,61 @@ getlatestrepo fetch [OPTIONS]
 
 | 参数 | 说明 |
 |------|------|
-| `-j, --jobs <N>` | 并发数（默认 5） |
-| `-t, --timeout <SECS>` | 单次 fetch 超时秒数（默认 30） |
+| `-j, --jobs <N>` | 并发数，默认 `5` |
+| `-t, --timeout <SECS>` | 单次 fetch 超时秒数，默认 `30` |
 
-### `status`
+示例：
 
 ```bash
-getlatestrepo status <PATH> [OPTIONS]
+getlatestrepo fetch
+getlatestrepo fetch --jobs 10 --timeout 60
 ```
 
-| 参数 | 说明 |
-|------|------|
-| `--diff` | 显示 diff 内容 |
+fetch 只获取远程对象和远程引用，不会把远程变更合并到工作区。
 
-### `config`
+fetch 会在执行前先归档当前远程跟踪分支 HEAD，fetch 成功后再归档本次新看到的远程跟踪分支 HEAD：
+
+```text
+refs/glr-remote-archive/<remote>/<branch>/<timestamp>-<oid>
+refs/glr-remote-archive-latest/<remote>/<branch>
+```
+
+这样远程以后 force-push、删除分支或删除仓库时，本地曾经 fetch 到且被远程分支指向过的提交仍有引用保护，不会轻易变成可被 Git GC 清理的孤立对象。fetch 前归档保护“上一次已经看到的远程 HEAD”，fetch 后归档保护“这一次刚看到的远程 HEAD”。
+
+---
+
+## status：查看仓库状态
+
+### 查看单个仓库
+
+```bash
+getlatestrepo status /path/to/repo
+```
+
+显示当前分支、本地修改、ahead/behind、远程地址、最近提交等信息。
+
+### 显示本地变更文件
+
+```bash
+getlatestrepo status /path/to/repo --diff
+```
+
+### 查看所有异常仓库
+
+```bash
+getlatestrepo status --issues
+```
+
+`--issues` 会汇总以下问题：
+
+- 认证隔离仓库
+- 远程不可达仓库
+- 本地有修改且落后远程的仓库
+- 数据库记录存在但本地路径缺失的仓库
+
+---
+
+## config：配置管理
 
 ```bash
 getlatestrepo config <SUBCOMMAND>
@@ -173,29 +212,191 @@ getlatestrepo config <SUBCOMMAND>
 | 子命令 | 说明 |
 |--------|------|
 | `add <PATH>` | 添加扫描源 |
-| `list` | 列出所有扫描源 |
-| `remove <PATH_OR_ID>` | 移除扫描源 |
-| `ignore <PATTERNS>` | 设置全局忽略规则（逗号分隔） |
-| `path` | 显示配置文件路径 |
+| `list` | 列出当前配置 |
+| `remove <PATH_OR_ID>` | 按路径或 ID 移除扫描源 |
+| `ignore <PATTERNS>` | 设置忽略规则，多个规则用英文逗号分隔 |
+| `path` | 显示配置文件和数据库位置 |
 
-### `workflow`
+示例：
+
+```bash
+getlatestrepo config add ~/more-repos
+getlatestrepo config list
+getlatestrepo config ignore 'node_modules,target,vendor,.cache'
+getlatestrepo config path
+```
+
+忽略规则会影响后续扫描，也会同步到已有扫描源配置。
+
+---
+
+## workflow：内置工作流
 
 ```bash
 getlatestrepo workflow [NAME] [OPTIONS]
 ```
 
+### 可用工作流
+
+| 工作流 | 流程 | 适用场景 |
+|--------|------|----------|
+| `daily` | fetch → scan | 日常巡检所有仓库 |
+| `check` | scan | 快速查看需要关注的仓库 |
+| `report` | fetch → scan(HTML) | 生成完整 HTML 报告 |
+| `ci` | fetch → scan → check | 检查是否存在落后远程的仓库 |
+| `pull-safe` | fetch → scan → pull | 只更新干净仓库 |
+| `pull-force` | fetch → scan → stash → pull → pop | 自动保存本地修改后再更新 |
+| `pull-backup` | fetch → scan → stash → hard reset → pop | 纯备份镜像同步 |
+
+### workflow 参数
+
 | 参数 | 说明 |
 |------|------|
-| `--list` | 列出所有可用工作流 |
-| `--dry-run` | 只显示执行计划，不实际运行 |
-| `--silent` | 静默模式（仅返回退出码） |
-| `-j, --jobs <N>` | 覆盖默认并发数 |
-| `-t, --timeout <SECS>` | 覆盖默认超时 |
-| `--yes` | 自动确认提示（仅 `pull-safe`） |
-| `--diff-after` | pull 后显示新提交（仅 pull 类工作流） |
-| `--no-pull-guard` | 禁用拉取安全检查（仅 `pull-safe`） |
+| `--list` | 列出所有工作流 |
+| `--dry-run` | 只显示执行计划，不实际执行 |
+| `--silent` | 静默模式，主要用于脚本判断退出码 |
+| `-j, --jobs <N>` | 覆盖工作流默认并发数 |
+| `-t, --timeout <SECS>` | 覆盖工作流默认超时 |
+| `--diff-after` | pull 后显示本次新增提交 |
+| `--yes` | 跳过 `pull-safe` 的确认提示 |
+| `--no-pull-guard` | 禁用 `pull-safe` 的远程删除保护 |
 
-### `discard`
+### 常用示例
+
+```bash
+# 日常检查
+getlatestrepo workflow daily
+
+# 查看工作流计划
+getlatestrepo workflow pull-backup --dry-run
+
+# 生成 HTML 报告
+getlatestrepo workflow report
+
+# 批量安全拉取，只处理干净仓库
+getlatestrepo workflow pull-safe --yes --diff-after
+
+# 本地有修改也尝试更新，失败时保留 stash 供手动恢复
+getlatestrepo workflow pull-force --diff-after
+
+# 纯备份同步，适合本地不保留手工改动的镜像仓库
+getlatestrepo workflow pull-backup --jobs 10 --timeout 60
+
+# 用于脚本：有仓库落后远程时返回非零退出码
+getlatestrepo workflow ci --silent
+```
+
+---
+
+## 三种 Pull 策略
+
+### pull-safe：保守更新
+
+```bash
+getlatestrepo workflow pull-safe
+```
+
+行为：
+
+- 只更新工作区干净的仓库
+- 有本地修改的仓库会跳过
+- 默认使用 fast-forward only，避免自动产生 merge commit
+- 适合包含本地长期改动仓库的目录
+
+### pull-force：保存本地修改后更新
+
+```bash
+getlatestrepo workflow pull-force
+```
+
+行为：
+
+- 有本地修改时先创建 stash
+- 执行 fast-forward pull
+- pull 成功后尝试 stash pop
+- stash pop 冲突时停止，并提示 stash 名称和恢复命令
+
+适合希望批量同步，但仍可能保留本地临时修改的仓库。
+
+### pull-backup：严格镜像远程
+
+```bash
+getlatestrepo workflow pull-backup
+```
+
+行为：
+
+- fetch 后对落后仓库执行备份同步
+- 如果本地 HEAD 会被 hard reset 丢弃，先创建归档引用
+- 归档引用位置为 `refs/glr-archive/history/<branch>/<timestamp>` 和 `refs/glr-archive/latest/<branch>`
+- 本地有修改时会先 stash，再 hard reset 到远程跟踪分支，最后尝试 stash pop
+- 如果检测到未合并索引，会跳过 stash 并按备份模式硬重置恢复
+- 如果遇到超长 symlink 检出问题，会尝试以 `core.symlinks=false` 回退
+
+适合纯备份仓库。不要把它用于需要长期保留本地手工改动的仓库。
+
+---
+
+## 安全扫描和高风险确认
+
+GetLatestRepo 会在 fetch 前做安全预扫描，也会在 pull/reset 前比较本地 `HEAD` 与 upstream tracking ref，检查真实远程差异。
+
+### 会检查什么
+
+| 类型 | 说明 |
+|------|------|
+| 敏感文件变更 | `.env`、密钥文件、CI 配置、容器配置、运行配置等 |
+| 可疑代码模式 | `eval`、`exec`、`system`、`subprocess`、`child_process`、base64 解码、`curl | sh` 等 |
+| 提交者异常 | 新增未知提交者 |
+| 文件数量异常 | 文件数量大幅减少或异常增加 |
+
+### 高风险如何确认
+
+如果多个仓库命中高风险，工具会一次性列出所有风险仓库和原因，然后等待一次输入。fetch 阶段和 pull/reset 阶段都使用同一套批量选择方式：
+
+```text
+输入 0 表示全部继续；
+输入 1,3,5 表示只继续这些序号；
+直接回车表示全部跳过。
+```
+
+继续的仓库会执行本次 fetch、pull 或 reset；未选择的仓库会保持当前本地状态。
+
+### 跳过或关闭
+
+```bash
+# 自动跳过高风险仓库，不进入交互
+getlatestrepo --auto-skip-high-risk workflow pull-backup
+
+# 完全关闭 pull/reset 前安全扫描
+getlatestrepo --no-security-check workflow pull-backup
+```
+
+不建议长期关闭安全扫描。
+
+---
+
+## 认证隔离 needauth
+
+当 fetch 返回认证失败、授权失败或远程仓库不存在时，GetLatestRepo 会把仓库移动到扫描根目录下的 `needauth/`。
+
+这样做的目的：
+
+- 不让需要登录或已删除的仓库反复阻塞正常仓库
+- 保留本地仓库内容，不直接删除
+- 后续认证恢复后，可以从 `needauth/` 迁回原位置
+
+典型路径：
+
+```text
+<扫描根目录>/needauth/<repo-name>
+```
+
+如果只是 DNS、代理、超时等临时网络问题，工具会归类为网络错误，不会移动到 `needauth/`。
+
+---
+
+## discard：丢弃本地修改
 
 ```bash
 getlatestrepo discard [PATH] [OPTIONS]
@@ -203,208 +404,125 @@ getlatestrepo discard [PATH] [OPTIONS]
 
 | 参数 | 说明 |
 |------|------|
+| `PATH` | 指定仓库路径；不传时列出可处理仓库供选择 |
 | `--yes` | 跳过确认提示 |
 
----
-
-## 工作流引擎
-
-工作流是 GetLatestRepo 的核心设计。每个工作流由多个步骤串联执行，覆盖从 fetch 到报告的完整流程。
-
-### 内置工作流
-
-| 工作流 | 步骤 | 说明 |
-|--------|------|------|
-| `daily` | fetch → scan | 日常巡检：拉取最新状态，终端展示汇总 |
-| `check` | scan（仅扫描） | 快速查看：不 fetch，只显示需要关注的仓库 |
-| `report` | fetch → scan（HTML） | 生成完整 HTML 报告，自动打开浏览器 |
-| `ci` | fetch → scan → check | CI 检查：有落后的仓库时返回错误码 |
-| `pull-safe` | fetch → scan → pull | 安全拉取：跳过有本地修改的仓库 |
-| `pull-force` | fetch → scan → stash → pull → pop | 强制拉取：自动 stash 本地修改 |
-| `pull-backup` | fetch → scan → hard reset | 备份同步：硬重置到远程状态，适合纯备份 |
-
-### 使用示例
+示例：
 
 ```bash
-# 日常巡检
-getlatestrepo workflow daily
-
-# CI 流水线集成（失败返回非零退出码）
-getlatestrepo workflow ci --silent
-
-# 安全批量拉取（自动跳过 dirty 仓库）
-getlatestrepo workflow pull-safe --yes --diff-after
-
-# 生成报告（自定义并发和超时）
-getlatestrepo workflow report --jobs 10 --timeout 60
-
-# 查看执行计划（不实际运行）
-getlatestrepo workflow pull-force --dry-run
+getlatestrepo discard /path/to/repo
+getlatestrepo discard --yes
 ```
+
+该命令会丢弃本地未提交修改。执行前请确认这些修改不需要保留。
 
 ---
 
-## 安全扫描机制
+## 报告
 
-GetLatestRepo 会先执行 fetch 下载远程对象，但不会合并到工作区；随后在 pull/reset 前比较本地 `HEAD` 与 upstream tracking ref，检查真实远程差异：
+报告默认保存到：
 
-### 检测项
-
-| 类别 | 检测内容 |
-|------|----------|
-| **敏感文件变更** | `.env`、密钥文件（`.pem`、`id_rsa`）、CI 配置（`.github/workflows`、`Jenkinsfile`）、容器凭证（`.docker/config.json`、`kubeconfig`） |
-| **可疑代码模式** | `eval()`/`exec()` 调用、base64 解码、暗网地址、`curl \| sh`、`wget` 下载等 |
-| **未知提交者** | 不在已知贡献者列表中的新提交者 |
-
-### 风险等级
-
-| 等级 | 处理方式 |
-|------|----------|
-| Safe | 正常执行 |
-| Medium | 提示确认 |
-| High | 阻断操作 |
-
-可通过 `--no-security-check` 全局参数禁用 pull 前安全扫描。
-
----
-
-## 配置文件
-
-配置文件位于 `~/.config/getlatestrepo/config.toml`（可通过 `getlatestrepo config path` 查看）。
-
-### 默认配置
-
-```toml
-default_jobs = 5        # 默认并发数
-default_timeout = 30    # 默认超时（秒）
-default_depth = 5       # 默认扫描深度
-
-# 忽略规则
-ignore_patterns = [
-    ".git",
-    "node_modules",
-    "target",
-    "vendor",
-    ".idea",
-    ".vscode",
-]
-
-# 同步配置
-[sync]
-auto_sync = true        # 自动扫描新增仓库
-strict_sync = false     # 严格模式：数量不一致时全量扫描
-```
-
-### 环境变量
-
-| 变量 | 说明 |
-|------|------|
-| `GETLATESTREPO_CONFIG_DIR` | 覆盖配置目录路径 |
-| `HTTP_PROXY` / `HTTPS_PROXY` | 系统代理（也可用 `--proxy` 参数） |
-
----
-
-## 报告系统
-
-生成的报告自动归档到：
-
-```
+```text
 reports/YYYY/MM/DD/getlatestrepo-report-YYYYMMDD-HHMMSS.<ext>
 ```
 
-- `reports/latest.html` 符号链接始终指向最新的 HTML 报告
-- 支持终端表格、HTML（暗色主题）、Markdown 三种格式
-- HTML 报告支持自动打开浏览器
+支持格式：
+
+| 格式 | 用法 |
+|------|------|
+| 终端表格 | `getlatestrepo scan --output terminal` |
+| HTML | `getlatestrepo scan --output html` 或 `getlatestrepo workflow report` |
+| Markdown | `getlatestrepo scan --output markdown` |
+
+`reports/latest.html` 会指向最新 HTML 报告，方便快速打开最近一次结果。
 
 ---
 
-## 技术栈
+## 配置和数据位置
 
-| 组件 | 技术选型 |
-|------|----------|
-| CLI 框架 | clap 4.5 |
-| Git 操作 | libgit2（git2 crate） |
-| 异步运行时 | Tokio |
-| 数据库 | SQLite（rusqlite + WAL 模式） |
-| 终端输出 | comfy-table + colored + indicatif（进度条） |
-| HTML 模板 | Askama |
-| 配置格式 | TOML + JSON |
+默认位置：
 
-### 构建优化
+| 内容 | 路径 |
+|------|------|
+| 配置文件 | `~/.config/getlatestrepo/config.toml` |
+| 数据库 | `~/.config/getlatestrepo/getlatestrepo.db` |
+| 进程锁 | `~/.cache/getlatestrepo.lock` |
+| 报告目录 | 当前项目目录下的 `reports/` |
 
-Release 构建启用 LTO、单代码生成单元、符号剥离，确保二进制体积最小化且运行高效。
+可通过命令查看实际路径：
+
+```bash
+getlatestrepo config path
+```
+
+可用环境变量：
+
+| 变量 | 说明 |
+|------|------|
+| `GETLATESTREPO_CONFIG_DIR` | 覆盖配置和数据库目录 |
+| `HTTP_PROXY` / `HTTPS_PROXY` | 系统代理环境变量 |
 
 ---
 
 ## 常见问题
 
-### Q: 扫描速度慢怎么办？
+### 扫描太慢怎么办？
 
-使用 `-d` 参数限制扫描深度，或在 `config.toml` 中调整 `default_depth`。对于大型目录树，适当减小深度可以显著提升速度。
-
-### Q: 如何排除特定目录？
-
-通过 `getlatestrepo config ignore <patterns>` 设置忽略规则，支持逗号分隔的多个模式。该命令会同步更新现有扫描源和未来新增扫描源。默认已忽略 `node_modules`、`target`、`vendor` 等常见目录。
-
-### Q: `pull-safe` 和 `pull-force` 有什么区别？
-
-- `pull-safe`：只拉取干净的仓库（无本地修改），有修改的仓库会被跳过
-- `pull-force`：自动 stash 本地修改 → pull → stash pop，适合批量同步但可能产生冲突
-- `pull-backup`：面向纯备份仓库，fetch 后硬重置到远程跟踪分支；如果本地已有未合并索引、空 stash 状态或超长 symlink 检出问题，会尽量自动恢复并给出明确诊断
-
-### Q: 如何在 CI 中使用？
+使用较小的扫描深度：
 
 ```bash
-getlatestrepo workflow ci --silent
-if [ $? -ne 0 ]; then
-    echo "有仓库落后于远程"
-    exit 1
-fi
+getlatestrepo scan --depth 3
 ```
 
-### Q: 代理不生效？
-
-优先级：`--proxy-url` > `--proxy` > 系统环境变量 `HTTP_PROXY`/`HTTPS_PROXY`。确保代理地址正确且可访问。
-
----
-
-## 贡献指南
-
-欢迎提交 Issue 和 Pull Request！
-
-1. Fork 本仓库
-2. 创建特性分支：`git checkout -b feature/your-feature`
-3. 提交更改：`git commit -m "feat: add your feature"`
-4. 推送分支：`git push origin feature/your-feature`
-5. 创建 Pull Request
-
-### 开发环境
+也可以配置忽略规则：
 
 ```bash
-git clone https://github.com/xcjy8/GetLatestRepo.git
-cd GetLatestRepo
-cargo build
-cargo test
+getlatestrepo config ignore 'node_modules,target,vendor,.cache'
 ```
 
----
+### 为什么有些仓库被移动到 needauth？
 
-## 版本日志
+通常是认证失败、权限不足或远程仓库不存在。仓库只是被隔离到 `needauth/`，本地内容不会被直接删除。
 
-| 版本 | 主要变更 |
-|------|----------|
-| v0.1.9 | 依赖安全升级、自动同步修复与发布前质量加固 |
-| v0.1.8 | pull-backup 工作流与 README 中英文重构 |
-| v0.1.7 | 全量缺陷修复与安全加固 |
-| v0.1.6 | Rust Edition 2024、死代码清理、预扫描安全批次 |
-| v0.1.5 | 移除 git2 网络 fetch 路径，基于数据验证优化 |
-| v0.1.4 | fetch 双层架构、进度条精简与 git2 偏好缓存 |
-| v0.1.3 | 三层优雅关闭 + 启动自检 + 残留清理 |
-| v0.1.2 | 14 项缺陷修复（安全/并发/Git 状态/信号/阻塞 IO） |
-| v0.1.1 | P0/P1/P2 全量修复与安全重构 |
-| v0.1.0 | 初始发布 |
+### 远程仓库删除了，本地会被删除吗？
 
-完整变更记录见 [GitHub Releases](https://github.com/xcjy8/GetLatestRepo/releases)。
+不会因为远程仓库 404 就删除本地仓库。fetch 会失败并进入认证隔离流程，本地 `.git` 和已有提交仍在。
+
+### pull-backup 会不会丢提交？
+
+如果 hard reset 会丢弃当前本地 HEAD，工具会先创建 `refs/glr-archive/` 归档引用。已经存在于本地对象库里的提交通常可以通过归档引用找回。
+
+另外，每次 fetch 前后，工具都会把当前可见的远程跟踪分支 HEAD 归档到 `refs/glr-remote-archive/`。这能进一步保护“曾经 fetch 到且当时被远程分支指向过”的提交。
+
+注意：如果某些远程提交从未 fetch 到本地，工具无法凭空恢复这些提交。
+
+### 高风险扫描提示很多，怎么快速处理？
+
+高风险仓库会批量汇总显示。输入：
+
+- `0`：全部继续
+- `1,3,5`：只继续指定序号
+- 直接回车：全部跳过
+
+如果希望无人值守执行，可以使用：
+
+```bash
+getlatestrepo --auto-skip-high-risk workflow pull-backup
+```
+
+### 如何确认本地命令是不是最新版？
+
+执行：
+
+```bash
+getlatestrepo --version
+```
+
+启动自检日志也会显示版本号，例如：
+
+```text
+ℹ️  启动自检完成（v0.1.11），已修复 1 条记录
+```
 
 ---
 
@@ -412,15 +530,7 @@ cargo test
 
 本项目采用双许可模式：
 
-- **AGPL-3.0-or-later** — 用于开源和非商业用途，详见 [LICENSE](LICENSE)
-- **商业许可** — 用于闭源或商业用途，请联系作者获取商业许可
+- AGPL-3.0-or-later：用于开源和非商业用途
+- 商业许可：用于闭源或商业用途
 
-如需在商业产品中使用本软件且不公开源代码，须从版权所有者处获取单独的商业许可。
-
----
-
-## 作者
-
-**xcjy8** — [GitHub](https://github.com/xcjy8)
-
-项目地址：[https://github.com/xcjy8/GetLatestRepo](https://github.com/xcjy8/GetLatestRepo)
+如需在闭源或商业产品中使用，请联系版权所有者获取商业许可。

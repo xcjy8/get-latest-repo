@@ -13,6 +13,53 @@ use crate::security::{SecurityScanner, format_security_report};
 
 use super::types::*;
 
+/// 交互式安全确认的批量选择结果。
+///
+/// Pull 前安全扫描可能一次命中几十甚至上百个高风险仓库。逐个询问会让操作者
+/// 难以快速决策，因此这里统一使用“先汇总、再输入序号”的模型：
+/// - `All`：输入 `0`，表示所有高风险仓库都继续执行。
+/// - `Some`：输入 `1,3,5` 或 `1 3 5`，只继续对应序号，其余跳过。
+/// - `None`：直接回车，表示全部跳过。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BatchRiskSelection {
+    All,
+    Some(std::collections::HashSet<usize>),
+    None,
+}
+
+/// 解析批量安全确认输入。
+///
+/// `total` 是本次展示的高风险仓库数量，序号从 1 开始。非法序号或无法解析的
+/// token 会返回错误，让调用方重新提示，避免误把用户输错的内容当成确认。
+fn parse_batch_risk_selection(input: &str, total: usize) -> Result<BatchRiskSelection> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(BatchRiskSelection::None);
+    }
+
+    let tokens: Vec<_> = trimmed
+        .split(|c: char| c == ',' || c == '，' || c.is_whitespace())
+        .filter(|token| !token.is_empty())
+        .collect();
+
+    if tokens.contains(&"0") {
+        return Ok(BatchRiskSelection::All);
+    }
+
+    let mut selected = std::collections::HashSet::new();
+    for token in tokens {
+        let index = token
+            .parse::<usize>()
+            .map_err(|_| anyhow::anyhow!("无法识别的序号: {}", token))?;
+        if index == 0 || index > total {
+            anyhow::bail!("序号 {} 超出范围，应在 1..={} 之间", index, total);
+        }
+        selected.insert(index);
+    }
+
+    Ok(BatchRiskSelection::Some(selected))
+}
+
 /// Unified view for printing repository change trees (used by both Repository and DirtyRepoInfo)
 trait RepoChangeView {
     fn name(&self) -> &str;
@@ -979,6 +1026,7 @@ impl WorkflowExecutor {
         }
 
         let mut allowed = Vec::new();
+        let mut risky = Vec::new();
         let mut skipped = Vec::new();
 
         if !self.silent {
@@ -1010,29 +1058,7 @@ impl WorkflowExecutor {
                     }
                     allowed.push(repo);
                 }
-                Ok((false, report)) => {
-                    if !self.silent && !report.is_empty() {
-                        println!("{report}");
-                    }
-
-                    let mut continue_pull = false;
-                    if !self.auto_skip_high_risk && !self.silent && std::io::stdin().is_terminal() {
-                        print!("是否仍然继续 Pull 高风险仓库 '{}'? [y/N] ", repo.name);
-                        std::io::stdout().flush()?;
-                        let mut input = String::new();
-                        std::io::stdin().read_line(&mut input)?;
-                        continue_pull = input.trim().eq_ignore_ascii_case("y");
-                    }
-
-                    if continue_pull {
-                        allowed.push(repo);
-                    } else {
-                        if !self.silent {
-                            println!("  │  {} 已跳过高风险仓库: {}", "⚠".yellow(), repo.name);
-                        }
-                        skipped.push(repo.name);
-                    }
-                }
+                Ok((false, report)) => risky.push((repo, report)),
                 Err(e) => {
                     if !self.silent {
                         eprintln!(
@@ -1044,6 +1070,95 @@ impl WorkflowExecutor {
                     }
                     skipped.push(repo.name);
                 }
+            }
+        }
+
+        if risky.is_empty() {
+            return Ok((allowed, skipped));
+        }
+
+        if self.auto_skip_high_risk || self.silent {
+            for (repo, _) in risky {
+                if !self.silent {
+                    println!("  │  {} 已跳过高风险仓库: {}", "⚠".yellow(), repo.name);
+                }
+                skipped.push(repo.name);
+            }
+            return Ok((allowed, skipped));
+        }
+
+        if !std::io::stdin().is_terminal() {
+            for (repo, _) in risky {
+                println!(
+                    "  │  {} stdin 不是 TTY，已跳过高风险仓库: {}",
+                    "⚠".yellow(),
+                    repo.name
+                );
+                skipped.push(repo.name);
+            }
+            return Ok((allowed, skipped));
+        }
+
+        println!();
+        println!("{}", "🛡️ Pull 前安全扫描命中高风险仓库".yellow().bold());
+        println!("{}", "═".repeat(50).yellow());
+        println!(
+            "输入 {} 表示全部继续；输入序号（如 {}）只继续指定仓库；直接回车表示全部跳过。",
+            "0".green().bold(),
+            "1,3,5".green()
+        );
+        println!("继续的仓库会执行本次 Pull/reset；未选择的仓库会保持当前本地状态。");
+
+        for (index, (repo, report)) in risky.iter().enumerate() {
+            println!();
+            println!("[{}] {}", index + 1, repo.name.as_str().bold());
+            if !report.is_empty() {
+                println!("{report}");
+            }
+        }
+
+        let selection = loop {
+            print!("\n请选择要继续 Pull 的高风险仓库序号（0=全部，回车=全部跳过）: ");
+            std::io::stdout().flush()?;
+
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            match parse_batch_risk_selection(&input, risky.len()) {
+                Ok(selection) => break selection,
+                Err(e) => {
+                    println!("  │  {} {}，请重新输入。", "⚠".yellow(), e);
+                }
+            }
+        };
+
+        for (index, (repo, _)) in risky.into_iter().enumerate() {
+            let number = index + 1;
+            let continue_pull = match &selection {
+                BatchRiskSelection::All => true,
+                BatchRiskSelection::Some(selected) => selected.contains(&number),
+                BatchRiskSelection::None => false,
+            };
+
+            if continue_pull {
+                if !self.silent {
+                    println!(
+                        "  │  {} 将继续 Pull 高风险仓库 [{}]: {}",
+                        "⚠".yellow(),
+                        number,
+                        repo.name
+                    );
+                }
+                allowed.push(repo);
+            } else {
+                if !self.silent {
+                    println!(
+                        "  │  {} 已跳过高风险仓库 [{}]: {}",
+                        "⚠".yellow(),
+                        number,
+                        repo.name
+                    );
+                }
+                skipped.push(repo.name);
             }
         }
 
@@ -2211,4 +2326,48 @@ impl WorkflowExecutor {
 
 fn yes_no(value: bool) -> &'static str {
     if value { "是" } else { "否" }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_batch_risk_selection_accepts_all() {
+        assert_eq!(
+            parse_batch_risk_selection("0", 5).unwrap(),
+            BatchRiskSelection::All
+        );
+        assert_eq!(
+            parse_batch_risk_selection("1,0,3", 5).unwrap(),
+            BatchRiskSelection::All
+        );
+    }
+
+    #[test]
+    fn parse_batch_risk_selection_accepts_number_lists() {
+        let selection = parse_batch_risk_selection("1, 3，5", 5).unwrap();
+        let BatchRiskSelection::Some(selected) = selection else {
+            panic!("应解析为部分选择");
+        };
+
+        assert!(selected.contains(&1));
+        assert!(selected.contains(&3));
+        assert!(selected.contains(&5));
+        assert!(!selected.contains(&2));
+    }
+
+    #[test]
+    fn parse_batch_risk_selection_treats_empty_as_skip_all() {
+        assert_eq!(
+            parse_batch_risk_selection("   ", 5).unwrap(),
+            BatchRiskSelection::None
+        );
+    }
+
+    #[test]
+    fn parse_batch_risk_selection_rejects_invalid_tokens() {
+        assert!(parse_batch_risk_selection("abc", 5).is_err());
+        assert!(parse_batch_risk_selection("6", 5).is_err());
+    }
 }
