@@ -8,19 +8,19 @@ use std::path::PathBuf;
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
-    
-    /// 禁用 fetch/pull 前的安全扫描
+
+    /// 禁用 pull/reset 前的远程差异安全扫描
     #[arg(long, global = true)]
     pub no_security_check: bool,
 
     /// 自动跳过高风险仓库（不交互确认，直接跳过）
     #[arg(long, global = true)]
     pub auto_skip_high_risk: bool,
-    
+
     /// 启用代理（默认：http://127.0.0.1:7890）
     #[arg(long, global = true)]
     pub proxy: bool,
-    
+
     /// 自定义代理地址（例如：http://127.0.0.1:1080）
     #[arg(long, global = true, value_name = "URL")]
     pub proxy_url: Option<String>,
@@ -71,7 +71,7 @@ pub enum Commands {
     /// 查看单个仓库详情
     Status {
         /// 仓库路径（设置 --issues 时会忽略）
-        path: PathBuf,
+        path: Option<PathBuf>,
 
         /// 显示本地变更文件列表
         #[arg(long)]
@@ -120,7 +120,7 @@ pub enum Commands {
         /// 自动确认（跳过 Y/n 提示，仅对 pull-safe 有效）
         #[arg(long)]
         yes: bool,
-        
+
         /// 禁用 pull 安全检查（远程删除检测）
         /// 警告：禁用后，如果远程仓库被清空，可能导致本地代码丢失！
         #[arg(long)]
@@ -141,24 +141,20 @@ pub enum Commands {
 #[derive(Subcommand)]
 pub enum ConfigCommands {
     /// 添加扫描路径
-    Add {
-        path: PathBuf,
-    },
-    
+    Add { path: PathBuf },
+
     /// 列出所有配置
     List,
-    
+
     /// 移除扫描路径
     Remove {
         /// 路径或 ID
         path_or_id: String,
     },
-    
+
     /// 设置忽略规则（用英文逗号分隔）
-    Ignore {
-        patterns: String,
-    },
-    
+    Ignore { patterns: String },
+
     /// 显示配置文件和数据库位置
     Path,
 }
@@ -175,7 +171,7 @@ pub enum OutputFormat {
 
 impl OutputFormat {
     /// Get file extension for output format
-    /// 
+    ///
     /// Currently unused, reserved for future report export functionality
     #[allow(dead_code)]
     pub fn extension(&self) -> &'static str {
@@ -183,6 +179,26 @@ impl OutputFormat {
             OutputFormat::Terminal => "txt",
             OutputFormat::Html => "html",
             OutputFormat::Markdown => "md",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn status_issues_does_not_require_path() {
+        let cli = Cli::try_parse_from(["getlatestrepo", "status", "--issues"])
+            .expect("status --issues 应允许省略仓库路径");
+
+        match cli.command {
+            Commands::Status { path, issues, .. } => {
+                assert!(issues);
+                assert!(path.is_none());
+            }
+            _ => panic!("应解析为 status 命令"),
         }
     }
 }

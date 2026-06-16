@@ -1,9 +1,9 @@
 use anyhow::Result;
 use askama::Template;
 
+use super::Reporter;
 use crate::git::format_duration;
 use crate::models::{Freshness, RepoSummary, Repository};
-use super::Reporter;
 
 #[derive(Template)]
 #[template(path = "report.html")]
@@ -14,7 +14,7 @@ struct HtmlTemplate {
 }
 
 /// HTML report repository view
-/// 
+///
 /// Note: some fields are for HTML template use, Rust compiler cannot detect usage in template
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -59,12 +59,19 @@ impl From<&Repository> for RepositoryView {
             is_dirty: repo.dirty,
             dirty_count: repo.dirty_files.len(),
             dirty_files: repo.dirty_files.clone(),
-            last_commit_message: repo.last_commit_message.clone()
+            last_commit_message: repo
+                .last_commit_message
+                .clone()
                 .unwrap_or_else(|| "-".to_string()),
-            last_commit_author: repo.last_commit_author.clone()
+            last_commit_author: repo
+                .last_commit_author
+                .clone()
                 .unwrap_or_else(|| "-".to_string()),
             last_update: format_duration(&repo.last_commit_at),
-            upstream_url: repo.upstream_url.as_ref().map(|url| crate::utils::sanitize_url(url)),
+            upstream_url: repo
+                .upstream_url
+                .as_ref()
+                .map(|url| crate::utils::sanitize_url(url)),
         }
     }
 }
@@ -90,5 +97,29 @@ impl Reporter for HtmlReporter {
 
     fn extension(&self) -> &'static str {
         "html"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn html_report_uses_status_class_without_duplicate_prefix() {
+        let repo = Repository {
+            name: "demo".to_string(),
+            freshness: Freshness::HasUpdates,
+            behind_count: 1,
+            ..Repository::default()
+        };
+        let mut summary = RepoSummary::new();
+        summary.add(&repo);
+
+        let html = HtmlReporter::new()
+            .generate(&[repo], &summary)
+            .expect("HTML 报告应成功渲染");
+
+        assert!(html.contains("class=\"badge status-behind\""));
+        assert!(!html.contains("status-status-behind"));
     }
 }

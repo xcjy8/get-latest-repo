@@ -40,11 +40,15 @@ cd "$(dirname "$0")/.."
 
 # 使用临时配置目录隔离测试环境
 export GETLATESTREPO_CONFIG_DIR="/tmp/rg-test-config-$$"
+export HOME="/tmp/rg-test-home-$$"
+export XDG_CACHE_HOME="/tmp/rg-test-cache-$$"
 mkdir -p "$GETLATESTREPO_CONFIG_DIR"
+mkdir -p "$HOME/Library/Caches" "$XDG_CACHE_HOME"
 
 # Clean previous test data
 echo "Cleaning test environment..."
-rm -rf /tmp/rg-test-dir /tmp/rg-init-test /tmp/test-repos 2>/dev/null || true
+rm -rf /tmp/rg-test-dir /tmp/rg-init-test /tmp/test-repos "$HOME" "$XDG_CACHE_HOME" 2>/dev/null || true
+mkdir -p "$GETLATESTREPO_CONFIG_DIR" "$HOME/Library/Caches" "$XDG_CACHE_HOME"
 
 # 创建测试目录并在其中初始化 Git 仓库（供 workflow check 扫描）
 mkdir -p /tmp/rg-test-dir
@@ -114,7 +118,7 @@ echo "----------------"
 run_test "config remove" "$GETLATESTREPO config remove /tmp/rg-test-dir"
 
 # Cleanup
-rm -rf /tmp/rg-test-dir /tmp/rg-init-test /tmp/test-repos "$GETLATESTREPO_CONFIG_DIR"
+rm -rf /tmp/rg-test-dir /tmp/rg-init-test /tmp/test-repos "$GETLATESTREPO_CONFIG_DIR" "$HOME" "$XDG_CACHE_HOME"
 
 echo ""
 echo "=========================================="

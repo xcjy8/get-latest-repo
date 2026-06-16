@@ -9,4 +9,5 @@ reports/
 docs/*
 !docs/images/
 !docs/images/**
-!reports/README.md
+.playwright-mcp/
+.idea/

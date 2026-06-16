@@ -6,7 +6,8 @@
 //! - Error handling (does not silently ignore errors)
 //! - Reasonable timeout handling
 
-use std::sync::mpsc::{channel, sync_channel, Sender};
+use std::collections::VecDeque;
+use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -41,60 +42,55 @@ where
     }
 
     let (tx, rx) = channel::<TaskResult<Option<T>>>();
-    // 使用 sync_channel 作为信号量，完全消除轮询和忙等
-    let (sem_tx, sem_rx) = sync_channel::<()>(max_concurrent);
-    // 预填充信号量，表示可用槽位
-    for _ in 0..max_concurrent {
-        let _ = sem_tx.send(());
-    }
-    let sem_tx = Arc::new(Mutex::new(sem_tx));
+    // 将任务放入共享队列，由固定数量 worker 拉取执行。
+    // 这样整体超时从 worker 启动后立即生效；即使前几个 Git/FS 任务永久卡住，
+    // 主线程也不会阻塞在“等待空闲槽位”的派发阶段。
+    let max_workers = max_concurrent.clamp(1, total);
+    let task_queue = Arc::new(Mutex::new(
+        tasks
+            .into_iter()
+            .enumerate()
+            .collect::<VecDeque<(usize, F)>>(),
+    ));
     let mut handles = Vec::new();
 
-    for (index, task) in tasks.into_iter().enumerate() {
-        if crate::signal_handler::is_shutdown_requested() {
-            for remaining_index in index..total {
-                let _ = tx.send(TaskResult { index: remaining_index, result: None });
-            }
-            break;
-        }
-
-        // 阻塞等待信号量（无轮询、无忙等）
-        if sem_rx.recv().is_err() {
-            break; // semaphore 已关闭
-        }
-
+    for worker_index in 0..max_workers {
         let tx_inner = Sender::clone(&tx);
-        let sem_tx_inner = Arc::clone(&sem_tx);
+        let task_queue = Arc::clone(&task_queue);
 
-        // Spawn thread with reduced stack size (1MB) to limit memory waste if threads are abandoned after timeout
+        // 每个 worker 使用较小栈，避免超时后分离的卡住线程浪费过多内存。
         match thread::Builder::new()
             .stack_size(1024 * 1024)
             .spawn(move || {
-                // Execute task (catch panic)
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task));
-
-                // Send result (panicked returns None)
-                let result = match result {
-                    Ok(r) => Some(r),
-                    Err(_) => {
-                        eprintln!("警告：任务 {} panic", index);
-                        None
+                loop {
+                    if crate::signal_handler::is_shutdown_requested() {
+                        break;
                     }
-                };
-                let _ = tx_inner.send(TaskResult { index, result });
-                // 释放信号量，通知等待者有空位
-                if let Ok(sem) = sem_tx_inner.lock() {
-                    let _ = sem.send(());
+
+                    let next_task = match task_queue.lock() {
+                        Ok(mut queue) => queue.pop_front(),
+                        Err(_) => None,
+                    };
+
+                    let Some((index, task)) = next_task else {
+                        break;
+                    };
+
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task));
+                    let result = match result {
+                        Ok(r) => Some(r),
+                        Err(_) => {
+                            eprintln!("警告：任务 {} panic", index);
+                            None
+                        }
+                    };
+
+                    let _ = tx_inner.send(TaskResult { index, result });
                 }
             }) {
             Ok(handle) => handles.push(handle),
             Err(e) => {
-                eprintln!("警告：为任务 {} 创建线程失败: {}", index, e);
-                // 释放信号量
-                if let Ok(sem) = sem_tx.lock() {
-                    let _ = sem.send(());
-                }
-                let _ = tx.send(TaskResult { index, result: None });
+                eprintln!("警告：创建 worker {} 失败: {}", worker_index, e);
             }
         }
     }
@@ -107,16 +103,23 @@ where
     let mut received = 0;
 
     // Overall deadline to prevent infinite hang on stuck git2/fs operations
-    let overall_deadline = std::time::Instant::now() + std::time::Duration::from_secs(crate::utils::CONCURRENT_OVERALL_TIMEOUT_SECS);
+    let overall_deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(crate::utils::CONCURRENT_OVERALL_TIMEOUT_SECS);
 
     while received < total {
         let remaining = overall_deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
-            eprintln!("警告：并发执行超过整体超时（120 秒），仍有 {} 个任务未完成", total - received);
+            eprintln!(
+                "警告：并发执行超过整体超时（120 秒），仍有 {} 个任务未完成",
+                total - received
+            );
             break;
         }
         // Use per-recv timeout of 30s (capped by remaining overall time)
-        let recv_timeout = std::cmp::min(remaining, std::time::Duration::from_secs(crate::utils::CONCURRENT_RECV_TIMEOUT_SECS));
+        let recv_timeout = std::cmp::min(
+            remaining,
+            std::time::Duration::from_secs(crate::utils::CONCURRENT_RECV_TIMEOUT_SECS),
+        );
 
         match rx.recv_timeout(recv_timeout) {
             Ok(task_result) => {
@@ -127,7 +130,10 @@ where
                 // Check if all threads have finished
                 let active_handles = handles.iter().filter(|h| !h.is_finished()).count();
                 if active_handles == 0 {
-                    eprintln!("警告：{} 个任务未完成，可能已 panic 或发送结果失败", total - received);
+                    eprintln!(
+                        "警告：{} 个任务未完成，可能已 panic 或发送结果失败",
+                        total - received
+                    );
                     break;
                 }
                 // If we still have active handles but overall deadline not yet reached,
@@ -174,9 +180,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_execute() {
-        let tasks: Vec<_> = (0..10)
-            .map(|i| move || -> i32 { i * 2 })
-            .collect();
+        let tasks: Vec<_> = (0..10).map(|i| move || -> i32 { i * 2 }).collect();
 
         let results = execute_concurrent_raw(tasks, 3);
 
@@ -214,7 +218,9 @@ mod tests {
         // Test that counter doesn't leak even if all tasks panic
         #[allow(clippy::unused_unit)]
         let tasks: Vec<Box<dyn FnOnce() + Send>> = (0..5)
-            .map(|i| Box::new(move || -> () { panic!("task {i} panic") }) as Box<dyn FnOnce() + Send>)
+            .map(|i| {
+                Box::new(move || -> () { panic!("task {i} panic") }) as Box<dyn FnOnce() + Send>
+            })
             .collect();
 
         let _results = execute_concurrent_raw(tasks, 2);

@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::Context;
 use crate::error::{GetLatestRepoError, Result};
 use crate::models::ScanSource;
+use anyhow::Context;
 
 /// Synchronization configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,26 +114,25 @@ impl AppConfig {
 
         let content = fs::read_to_string(&path)
             .with_context(|| format!("无法读取配置文件: {}", path.display()))?;
-        
+
         let config: AppConfig = toml::from_str(&content)
             .with_context(|| format!("无法解析配置文件: {}", path.display()))?;
-        
+
         Ok(config)
     }
 
     /// Save configuration
-    /// 
+    ///
     /// Set config file permissions to 0600 (owner read/write only)
     pub fn save(&self) -> Result<()> {
         Self::ensure_config_dir()?;
         let path = Self::config_path()?;
-        
-        let content = toml::to_string_pretty(self)
-            .context("无法序列化配置")?;
-        
+
+        let content = toml::to_string_pretty(self).context("无法序列化配置")?;
+
         fs::write(&path, content)
             .with_context(|| format!("无法写入配置文件: {}", path.display()))?;
-        
+
         // Set permissions to 0600 (owner read/write only)
         #[cfg(unix)]
         {
@@ -143,18 +142,19 @@ impl AppConfig {
                 eprintln!("警告：设置配置文件权限失败: {}", e);
             }
         }
-        
+
         Ok(())
     }
 
     /// Add scan source
     pub fn add_scan_source(&mut self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
-        let canonical = path.canonicalize()
+        let canonical = path
+            .canonicalize()
             .with_context(|| format!("无法访问路径: {}", path.display()))?;
-        
+
         let path_str = canonical.to_string_lossy().to_string();
-        
+
         // Check if already exists
         if self.scan_sources.iter().any(|s| s.root_path == path_str) {
             return Err(GetLatestRepoError::DuplicatePath(path_str));
@@ -169,14 +169,14 @@ impl AppConfig {
 
         self.scan_sources.push(source);
         self.save()?;
-        
+
         Ok(())
     }
 
     /// Remove scan source
     pub fn remove_scan_source(&mut self, path_or_id: &str) -> Result<()> {
         let before = self.scan_sources.len();
-        
+
         // Try parsing as ID
         if let Ok(id) = path_or_id.parse::<i64>() {
             self.scan_sources.retain(|s| s.id != Some(id));
@@ -200,9 +200,30 @@ impl AppConfig {
         Ok(())
     }
 
+    /// Remove scan source by the 1-based index shown by `config list`.
+    ///
+    /// The TOML config is the durable user-facing source of scan roots, while SQLite
+    /// stores its own internal row IDs. Keeping this index-based removal here prevents
+    /// command code from guessing whether a numeric argument means a DB row ID or the
+    /// displayed list number.
+    pub fn remove_scan_source_by_index(&mut self, index: usize) -> Result<ScanSource> {
+        if index == 0 || index > self.scan_sources.len() {
+            return Err(GetLatestRepoError::SourceNotFound(index.to_string()));
+        }
+
+        let removed = self.scan_sources.remove(index - 1);
+        self.save()?;
+        Ok(removed)
+    }
+
     /// Set ignore rules
     pub fn set_ignore_patterns(&mut self, patterns: Vec<String>) -> Result<()> {
-        self.ignore_patterns = patterns;
+        self.ignore_patterns = patterns.clone();
+        // 已有扫描源持有自己的 ignore_patterns。同步更新它们，保证
+        // `config ignore` 对后续扫描立即生效，而不是只影响未来新增扫描源。
+        for source in &mut self.scan_sources {
+            source.ignore_patterns = patterns.clone();
+        }
         self.save()?;
         Ok(())
     }

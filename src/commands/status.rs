@@ -9,16 +9,16 @@ use crate::git::GitOps;
 use crate::reporter::terminal::{print_issues_view, print_repo_detail};
 
 /// Execute status command
-pub async fn execute(path: PathBuf, show_diff: bool, issues: bool) -> Result<()> {
+pub async fn execute(path: Option<PathBuf>, show_diff: bool, issues: bool) -> Result<()> {
     let db = Database::open()?;
-    
+
     if issues {
         let repos = match tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            tokio::task::spawn_blocking(move || {
-                db.list_repositories()
-            })
-        ).await {
+            tokio::task::spawn_blocking(move || db.list_repositories()),
+        )
+        .await
+        {
             Ok(Ok(Ok(repos))) => repos,
             Ok(Ok(Err(e))) => return Err(e),
             Ok(Err(_)) => anyhow::bail!("数据库查询任务 panic"),
@@ -31,7 +31,10 @@ pub async fn execute(path: PathBuf, show_diff: bool, issues: bool) -> Result<()>
         print_issues_view(&repos);
         return Ok(());
     }
-    
+
+    let path =
+        path.ok_or_else(|| anyhow::anyhow!("请提供仓库路径，或使用 --issues 查看所有异常仓库"))?;
+
     let canonical = path
         .canonicalize()
         .with_context(|| format!("无法访问路径：{}", path.display()))?;

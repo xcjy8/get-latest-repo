@@ -9,6 +9,7 @@ use crate::fetcher::{FetchSummary, Fetcher};
 use crate::git::ProxyConfig;
 use crate::models::{Freshness, RepoSummary};
 use crate::scanner::Scanner;
+use crate::security::{SecurityScanner, format_security_report};
 
 use super::types::*;
 
@@ -22,19 +23,39 @@ trait RepoChangeView {
 }
 
 impl RepoChangeView for crate::models::Repository {
-    fn name(&self) -> &str { &self.name }
-    fn path(&self) -> &str { &self.path }
-    fn branch(&self) -> Option<&str> { self.branch.as_deref() }
-    fn file_changes(&self) -> &[crate::models::FileChange] { &self.file_changes }
-    fn change_summary(&self) -> String { self.change_summary() }
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn path(&self) -> &str {
+        &self.path
+    }
+    fn branch(&self) -> Option<&str> {
+        self.branch.as_deref()
+    }
+    fn file_changes(&self) -> &[crate::models::FileChange] {
+        &self.file_changes
+    }
+    fn change_summary(&self) -> String {
+        self.change_summary()
+    }
 }
 
 impl RepoChangeView for crate::workflow::types::DirtyRepoInfo {
-    fn name(&self) -> &str { &self.name }
-    fn path(&self) -> &str { &self.path }
-    fn branch(&self) -> Option<&str> { self.branch.as_deref() }
-    fn file_changes(&self) -> &[crate::models::FileChange] { &self.file_changes }
-    fn change_summary(&self) -> String { self.change_summary() }
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn path(&self) -> &str {
+        &self.path
+    }
+    fn branch(&self) -> Option<&str> {
+        self.branch.as_deref()
+    }
+    fn file_changes(&self) -> &[crate::models::FileChange] {
+        &self.file_changes
+    }
+    fn change_summary(&self) -> String {
+        self.change_summary()
+    }
 }
 
 /// Convert a Repository into a DirtyRepoInfo
@@ -52,7 +73,12 @@ fn print_repo_change_tree(repo: &impl RepoChangeView, is_last: bool, base_indent
     println!("{}📁 {}", meta, repo.path().dimmed());
 
     let branch_info = repo.branch().unwrap_or("未知");
-    println!("{}🌿 分支: {} | 状态: {}", meta, branch_info.cyan(), repo.change_summary().yellow());
+    println!(
+        "{}🌿 分支: {} | 状态: {}",
+        meta,
+        branch_info.cyan(),
+        repo.change_summary().yellow()
+    );
 
     if !repo.file_changes().is_empty() {
         println!("{}📝 变更文件（{}）:", meta, repo.file_changes().len());
@@ -70,14 +96,30 @@ fn print_repo_change_tree(repo: &impl RepoChangeView, is_last: bool, base_indent
                 _ => "?",
             };
 
-            println!("{}{} {} {} {}",
-                file_pad, file_tree, status_icon, change.path,
-                if change.staged { "（已暂存）".green() } else { "（未暂存）".dimmed() }
+            println!(
+                "{}{} {} {} {}",
+                file_pad,
+                file_tree,
+                status_icon,
+                change.path,
+                if change.staged {
+                    "（已暂存）".green()
+                } else {
+                    "（未暂存）".dimmed()
+                }
             );
 
-            let detail = if is_last_file { "         " } else { "   │     " };
+            let detail = if is_last_file {
+                "         "
+            } else {
+                "   │     "
+            };
             println!("{}影响: {}", detail, change.impact.dimmed());
-            println!("{}执行 pull-force 后: {}", detail, change.stash_effect.dimmed());
+            println!(
+                "{}执行 pull-force 后: {}",
+                detail,
+                change.stash_effect.dimmed()
+            );
 
             if !is_last_file {
                 println!("{}", file_pad);
@@ -95,7 +137,7 @@ pub struct WorkflowExecutor {
     silent: bool,
     security_check: bool,
     auto_skip_high_risk: bool,
-    pull_safety_check: bool,  // Pull safety check (prevent repo deletion)
+    pull_safety_check: bool, // Pull safety check (prevent repo deletion)
     proxy: ProxyConfig,
 }
 
@@ -113,9 +155,9 @@ impl WorkflowExecutor {
             workflow,
             dry_run,
             silent,
-            security_check: true,  // Enabled by default
+            security_check: true, // Enabled by default
             auto_skip_high_risk: false,
-            pull_safety_check: true,  // Enabled repo-deletion detection by default
+            pull_safety_check: true, // Enabled repo-deletion detection by default
             proxy: ProxyConfig::default(),
         }
     }
@@ -197,7 +239,10 @@ impl WorkflowExecutor {
                     let timeout = timeout.unwrap_or(self.timeout);
 
                     if !self.silent {
-                        println!("  [{}] Fetch 所有仓库", format!("{}/{}", step_num, total_steps).cyan());
+                        println!(
+                            "  [{}] Fetch 所有仓库",
+                            format!("{}/{}", step_num, total_steps).cyan()
+                        );
                     }
 
                     match self.execute_fetch(&db, &sources, jobs, timeout).await {
@@ -205,12 +250,18 @@ impl WorkflowExecutor {
                             if !self.silent {
                                 // Proxy info
                                 if self.proxy.enabled {
-                                    println!("  ├─ {} {}", "ℹ".blue(), self.proxy.http_proxy.dimmed());
+                                    println!(
+                                        "  ├─ {} {}",
+                                        "ℹ".blue(),
+                                        self.proxy.http_proxy.dimmed()
+                                    );
                                 }
 
                                 // Progress bar
-                                println!("  ├─ ████████████████████████████████████████ {:>2}/{}",
-                                    summary.total, summary.total);
+                                println!(
+                                    "  ├─ ████████████████████████████████████████ {:>2}/{}",
+                                    summary.total, summary.total
+                                );
 
                                 // Result statistics
                                 let success_str = format!("{}", summary.success).green();
@@ -219,7 +270,8 @@ impl WorkflowExecutor {
                                 } else {
                                     format!("{}", summary.failed).green()
                                 };
-                                println!("  ├─ {} 总计: {} | 成功: {} | 失败: {}",
+                                println!(
+                                    "  ├─ {} 总计: {} | 成功: {} | 失败: {}",
                                     "▶".blue(),
                                     summary.total,
                                     success_str,
@@ -230,16 +282,16 @@ impl WorkflowExecutor {
                                 if summary.failed > 0 {
                                     println!("  │");
                                     println!("  └─ {} 失败详情:", "⚠".yellow());
-                                    let failed_repos: Vec<_> = summary.results.iter()
-                                        .filter(|r| !r.success)
-                                        .collect();
+                                    let failed_repos: Vec<_> =
+                                        summary.results.iter().filter(|r| !r.success).collect();
                                     for (i, repo) in failed_repos.iter().enumerate() {
                                         let is_last = i == failed_repos.len() - 1;
                                         let corner = if is_last { "└─" } else { "├─" };
 
                                         let error_msg = repo.error.as_deref().unwrap_or("未知错误");
                                         let short_error = if error_msg.chars().count() > 42 {
-                                            let truncated: String = error_msg.chars().take(42).collect();
+                                            let truncated: String =
+                                                error_msg.chars().take(42).collect();
                                             format!("{truncated}...")
                                         } else {
                                             error_msg.to_string()
@@ -248,7 +300,8 @@ impl WorkflowExecutor {
                                             .file_name()
                                             .and_then(|n| n.to_str())
                                             .unwrap_or(&repo.repo_path);
-                                        println!("     {} {} {}: {}",
+                                        println!(
+                                            "     {} {} {}: {}",
                                             corner,
                                             short_path,
                                             "𐄂".dimmed(),
@@ -268,20 +321,28 @@ impl WorkflowExecutor {
                     }
                 }
 
-                WorkflowStep::Scan { output, open, only_dirty_or_behind } => {
+                WorkflowStep::Scan {
+                    output,
+                    open,
+                    only_dirty_or_behind,
+                } => {
                     if !self.silent {
                         let output_name = match output {
                             OutputFormat::Terminal => "终端",
                             OutputFormat::Html => "HTML",
                             OutputFormat::Markdown => "Markdown",
                         };
-                        print!("[{}] 扫描并生成 {} 报告... ",
+                        print!(
+                            "[{}] 扫描并生成 {} 报告... ",
                             format!("{}/{}", step_num, total_steps).cyan(),
                             output_name
                         );
                     }
 
-                    match self.execute_scan(&db, &sources, *output, *open, *only_dirty_or_behind).await {
+                    match self
+                        .execute_scan(&db, &sources, *output, *open, *only_dirty_or_behind)
+                        .await
+                    {
                         Ok(summary) => {
                             if !self.silent {
                                 println!("{} {} 个仓库", "✓".green(), summary.total);
@@ -298,9 +359,15 @@ impl WorkflowExecutor {
                     }
                 }
 
-                WorkflowStep::Check { condition, silent: check_silent } => {
+                WorkflowStep::Check {
+                    condition,
+                    silent: check_silent,
+                } => {
                     if !self.silent && !check_silent {
-                        print!("[{}] 检查条件... ", format!("{}/{}", step_num, total_steps).cyan());
+                        print!(
+                            "[{}] 检查条件... ",
+                            format!("{}/{}", step_num, total_steps).cyan()
+                        );
                     }
 
                     let check_result = self.execute_check(condition, &result);
@@ -321,39 +388,64 @@ impl WorkflowExecutor {
                     }
                 }
 
-                WorkflowStep::PullSafe { jobs, confirm, diff_after } => {
+                WorkflowStep::PullSafe {
+                    jobs,
+                    confirm,
+                    diff_after,
+                } => {
                     let jobs = jobs.unwrap_or(self.jobs);
 
                     if !self.silent {
-                        println!("  [{}] 安全 Pull", format!("{}/{}", step_num, total_steps).cyan());
+                        println!(
+                            "  [{}] 安全 Pull",
+                            format!("{}/{}", step_num, total_steps).cyan()
+                        );
                     }
 
-                    match self.execute_pull_safe(&db, &sources, jobs, *confirm && !self.dry_run, *diff_after).await {
+                    match self
+                        .execute_pull_safe(
+                            &db,
+                            &sources,
+                            jobs,
+                            *confirm && !self.dry_run,
+                            *diff_after,
+                        )
+                        .await
+                    {
                         Ok(pull_result) => {
                             if !self.silent {
                                 if pull_result.total_count == 0 {
                                     println!("  └─ {} 没有需要更新的仓库", "ℹ".blue());
                                 } else {
                                     let success_str = pull_result.success_count.to_string().green();
-                                    let skip_count = pull_result.skipped_repos.len() + pull_result.dirty_repos.len();
+                                    let skip_count = pull_result.skipped_repos.len()
+                                        + pull_result.dirty_repos.len();
                                     let skip_str = skip_count.to_string().dimmed();
                                     let failed_str = if pull_result.failed_count > 0 {
                                         pull_result.failed_count.to_string().red()
                                     } else {
                                         pull_result.failed_count.to_string().green()
                                     };
-                                    println!("  └─ {} 成功: {} | 跳过: {} | 失败: {}",
-                                        "▶".blue(), success_str, skip_str, failed_str
+                                    println!(
+                                        "  └─ {} 成功: {} | 跳过: {} | 失败: {}",
+                                        "▶".blue(),
+                                        success_str,
+                                        skip_str,
+                                        failed_str
                                     );
 
                                     // 展示成功拉取的仓库列表及最新提交时间
                                     if !pull_result.success_repos.is_empty() {
                                         println!("     {} 成功拉取的仓库:", "✓".green());
-                                        for (i, (name, time)) in pull_result.success_repos.iter().enumerate() {
+                                        for (i, (name, time)) in
+                                            pull_result.success_repos.iter().enumerate()
+                                        {
                                             let is_last = i == pull_result.success_repos.len() - 1;
                                             let corner = if is_last { "└─" } else { "├─" };
-                                            let time_str = time.as_deref().unwrap_or("（无时间信息）");
-                                            println!("        {} {} {}",
+                                            let time_str =
+                                                time.as_deref().unwrap_or("（无时间信息）");
+                                            println!(
+                                                "        {} {} {}",
                                                 corner,
                                                 name.green(),
                                                 format!("- {}", time_str).dimmed()
@@ -363,21 +455,30 @@ impl WorkflowExecutor {
                                     }
 
                                     if !pull_result.dirty_repos.is_empty() {
-                                        println!("     {} 存在本地变更的仓库（需要手动处理）:", "⚠️".yellow());
+                                        println!(
+                                            "     {} 存在本地变更的仓库（需要手动处理）:",
+                                            "⚠️".yellow()
+                                        );
                                         println!();
-                                        
-                                        for (i, repo_info) in pull_result.dirty_repos.iter().enumerate() {
+
+                                        for (i, repo_info) in
+                                            pull_result.dirty_repos.iter().enumerate()
+                                        {
                                             let is_last = i == pull_result.dirty_repos.len() - 1;
                                             print_repo_change_tree(repo_info, is_last, 8);
                                             if !is_last {
                                                 println!();
                                             }
                                         }
-                                        
+
                                         println!();
                                         println!("     💡 建议:");
-                                        println!("        ├─ 运行 'pull-force' 自动 stash → pull → pop");
-                                        println!("        ├─ 运行 'git restore .' 丢弃所有本地变更");
+                                        println!(
+                                            "        ├─ 运行 'pull-force' 自动 stash → pull → pop"
+                                        );
+                                        println!(
+                                            "        ├─ 运行 'git restore .' 丢弃所有本地变更"
+                                        );
                                         println!("        └─ 或手动处理后再运行 'pull-safe'");
                                     }
 
@@ -413,47 +514,72 @@ impl WorkflowExecutor {
                     let jobs = jobs.unwrap_or(self.jobs);
 
                     if !self.silent {
-                        print!("[{}] 强制 Pull... ", format!("{}/{}", step_num, total_steps).cyan());
+                        print!(
+                            "[{}] 强制 Pull... ",
+                            format!("{}/{}", step_num, total_steps).cyan()
+                        );
                     }
 
-                    match self.execute_pull_force(&db, &sources, jobs, *diff_after).await {
+                    match self
+                        .execute_pull_force(&db, &sources, jobs, *diff_after)
+                        .await
+                    {
                         Ok(pull_result) => {
                             if !self.silent {
-                                println!("{} {}/{}", "✓".green(),
+                                println!(
+                                    "{} {}/{}",
+                                    "✓".green(),
                                     pull_result.success_count,
                                     pull_result.total_count
                                 );
 
                                 if !pull_result.conflict_repos.is_empty() {
-                                    println!("   {} 个仓库发生 stash pop 冲突，需要手动恢复:",
-                                        pull_result.conflict_repos.len().to_string().yellow());
+                                    println!(
+                                        "   {} 个仓库发生 stash pop 冲突，需要手动恢复:",
+                                        pull_result.conflict_repos.len().to_string().yellow()
+                                    );
                                     for (i, info) in pull_result.conflict_repos.iter().enumerate() {
                                         let is_last = i == pull_result.conflict_repos.len() - 1;
-                                        let repo_connector = if is_last { "└─" } else { "├─" };
+                                        let repo_connector =
+                                            if is_last { "└─" } else { "├─" };
 
                                         println!("     {} 📦 {}", repo_connector, info.name.bold());
 
                                         let stash_display = match info.stash_index {
-                                            Some(idx) => format!("{}（stash@{{{}}}）", info.stash_message, idx),
+                                            Some(idx) => format!(
+                                                "{}（stash@{{{}}}）",
+                                                info.stash_message, idx
+                                            ),
                                             None => info.stash_message.clone(),
                                         };
                                         println!("        ├─ stash: {}", stash_display);
 
                                         if !info.conflict_files.is_empty() {
-                                            println!("        ├─ 冲突文件（{}）:", info.conflict_files.len());
-                                            for (j, file) in info.conflict_files.iter().enumerate() {
-                                                let is_last_file = j == info.conflict_files.len() - 1;
-                                                let file_connector = if is_last_file { "└─" } else { "├─" };
+                                            println!(
+                                                "        ├─ 冲突文件（{}）:",
+                                                info.conflict_files.len()
+                                            );
+                                            for (j, file) in info.conflict_files.iter().enumerate()
+                                            {
+                                                let is_last_file =
+                                                    j == info.conflict_files.len() - 1;
+                                                let file_connector =
+                                                    if is_last_file { "└─" } else { "├─" };
                                                 println!("        │  {} {}", file_connector, file);
                                             }
                                         }
 
-                                        println!("        └─ 恢复命令: git -C {} stash pop stash@{{index}}", info.path);
+                                        println!(
+                                            "        └─ 恢复命令: git -C {} stash pop stash@{{index}}",
+                                            info.path
+                                        );
                                     }
                                 }
                                 if pull_result.failed_count > 0 {
-                                    println!("   {} 个仓库失败",
-                                        pull_result.failed_count.to_string().red());
+                                    println!(
+                                        "   {} 个仓库失败",
+                                        pull_result.failed_count.to_string().red()
+                                    );
                                 }
 
                                 if *diff_after && !pull_result.pulled_repos.is_empty() {
@@ -486,16 +612,23 @@ impl WorkflowExecutor {
                     let jobs = jobs.unwrap_or(self.jobs);
 
                     if !self.silent {
-                        println!("  [{}] 备份 Pull（hard reset 到远程）", format!("{}/{}", step_num, total_steps).cyan());
+                        println!(
+                            "  [{}] 备份 Pull（hard reset 到远程）",
+                            format!("{}/{}", step_num, total_steps).cyan()
+                        );
                     }
 
-                    match self.execute_pull_backup(&db, &sources, jobs, *diff_after).await {
+                    match self
+                        .execute_pull_backup(&db, &sources, jobs, *diff_after)
+                        .await
+                    {
                         Ok(pull_result) => {
                             if !self.silent {
                                 if pull_result.total_count == 0 {
                                     println!("  └─ {} 没有需要更新的仓库", "ℹ".blue());
                                 } else {
-                                    println!("  └─ {} 成功: {} | 失败: {}",
+                                    println!(
+                                        "  └─ {} 成功: {} | 失败: {}",
                                         "▶".blue(),
                                         pull_result.success_count.to_string().green(),
                                         if pull_result.failed_count > 0 {
@@ -506,11 +639,17 @@ impl WorkflowExecutor {
                                     );
 
                                     if !pull_result.archived_repos.is_empty() {
-                                        println!("     {} 已归档历史（远程历史被重写）:", "📦".cyan());
-                                        for (i, (name, archive_ref)) in pull_result.archived_repos.iter().enumerate() {
+                                        println!(
+                                            "     {} 已归档历史（远程历史被重写）:",
+                                            "📦".cyan()
+                                        );
+                                        for (i, (name, archive_ref)) in
+                                            pull_result.archived_repos.iter().enumerate()
+                                        {
                                             let is_last = i == pull_result.archived_repos.len() - 1;
                                             let corner = if is_last { "└─" } else { "├─" };
-                                            println!("        {} {} {}",
+                                            println!(
+                                                "        {} {} {}",
                                                 corner,
                                                 name.yellow(),
                                                 format!("→ {}", archive_ref).dimmed()
@@ -521,11 +660,15 @@ impl WorkflowExecutor {
 
                                     if !pull_result.success_repos.is_empty() {
                                         println!("     {} 成功同步的仓库:", "✓".green());
-                                        for (i, (name, time)) in pull_result.success_repos.iter().enumerate() {
+                                        for (i, (name, time)) in
+                                            pull_result.success_repos.iter().enumerate()
+                                        {
                                             let is_last = i == pull_result.success_repos.len() - 1;
                                             let corner = if is_last { "└─" } else { "├─" };
-                                            let time_str = time.as_deref().unwrap_or("（无时间信息）");
-                                            println!("        {} {} {}",
+                                            let time_str =
+                                                time.as_deref().unwrap_or("（无时间信息）");
+                                            println!(
+                                                "        {} {} {}",
                                                 corner,
                                                 name.green(),
                                                 format!("- {}", time_str).dimmed()
@@ -535,36 +678,66 @@ impl WorkflowExecutor {
                                     }
 
                                     if !pull_result.conflict_repos.is_empty() {
-                                        println!("     {} 个仓库发生 stash pop 冲突，需要手动恢复:",
-                                            pull_result.conflict_repos.len().to_string().yellow());
-                                        for (i, info) in pull_result.conflict_repos.iter().enumerate() {
+                                        println!(
+                                            "     {} 个仓库发生 stash pop 冲突，需要手动恢复:",
+                                            pull_result.conflict_repos.len().to_string().yellow()
+                                        );
+                                        for (i, info) in
+                                            pull_result.conflict_repos.iter().enumerate()
+                                        {
                                             let is_last = i == pull_result.conflict_repos.len() - 1;
-                                            let repo_connector = if is_last { "└─" } else { "├─" };
+                                            let repo_connector =
+                                                if is_last { "└─" } else { "├─" };
 
-                                            println!("        {} 📦 {}", repo_connector, info.name.bold());
+                                            println!(
+                                                "        {} 📦 {}",
+                                                repo_connector,
+                                                info.name.bold()
+                                            );
 
                                             let stash_display = match info.stash_index {
-                                                Some(idx) => format!("{}（stash@{{{}}}）", info.stash_message, idx),
+                                                Some(idx) => format!(
+                                                    "{}（stash@{{{}}}）",
+                                                    info.stash_message, idx
+                                                ),
                                                 None => info.stash_message.clone(),
                                             };
                                             println!("           ├─ stash: {}", stash_display);
 
                                             if !info.conflict_files.is_empty() {
-                                                println!("           ├─ 冲突文件（{}）:", info.conflict_files.len());
-                                                for (j, file) in info.conflict_files.iter().enumerate() {
-                                                    let is_last_file = j == info.conflict_files.len() - 1;
-                                                    let file_connector = if is_last_file { "└─" } else { "├─" };
-                                                    println!("           │  {} {}", file_connector, file);
+                                                println!(
+                                                    "           ├─ 冲突文件（{}）:",
+                                                    info.conflict_files.len()
+                                                );
+                                                for (j, file) in
+                                                    info.conflict_files.iter().enumerate()
+                                                {
+                                                    let is_last_file =
+                                                        j == info.conflict_files.len() - 1;
+                                                    let file_connector = if is_last_file {
+                                                        "└─"
+                                                    } else {
+                                                        "├─"
+                                                    };
+                                                    println!(
+                                                        "           │  {} {}",
+                                                        file_connector, file
+                                                    );
                                                 }
                                             }
 
-                                            println!("           └─ 恢复命令: git -C {} stash pop stash@{{index}}", info.path);
+                                            println!(
+                                                "           └─ 恢复命令: git -C {} stash pop stash@{{index}}",
+                                                info.path
+                                            );
                                         }
                                     }
 
                                     if pull_result.failed_count > 0 {
-                                        println!("     {} 个仓库失败",
-                                            pull_result.failed_count.to_string().red());
+                                        println!(
+                                            "     {} 个仓库失败",
+                                            pull_result.failed_count.to_string().red()
+                                        );
                                     }
 
                                     if *diff_after && !pull_result.pulled_repos.is_empty() {
@@ -627,17 +800,17 @@ impl WorkflowExecutor {
         let app_config = AppConfig::load()?;
         let sync = crate::sync::RepoSync::new(app_config.sync.auto_sync);
         let sync_status = sync.ensure_synced(sources, db, !self.silent).await?;
-        
+
         if !self.silent && sync_status.needs_scan() {
             println!("  ├─ {}\n", sync_status.description());
         }
 
         let all_repos = db.list_repositories()?;
-        let source_paths: std::collections::HashSet<_> = sources.iter()
-            .map(|s| s.root_path.as_str())
-            .collect();
+        let source_paths: std::collections::HashSet<_> =
+            sources.iter().map(|s| s.root_path.as_str()).collect();
 
-        let mut repos: Vec<_> = all_repos.into_iter()
+        let mut repos: Vec<_> = all_repos
+            .into_iter()
             .filter(|r| source_paths.contains(r.root_path.as_str()))
             .collect();
 
@@ -645,7 +818,8 @@ impl WorkflowExecutor {
             let _ = Scanner::scan_all(sources, db, false, jobs).await?;
 
             let all_repos = db.list_repositories()?;
-            repos = all_repos.into_iter()
+            repos = all_repos
+                .into_iter()
                 .filter(|r| source_paths.contains(r.root_path.as_str()))
                 .collect();
         }
@@ -671,16 +845,26 @@ impl WorkflowExecutor {
         open: bool,
         only_dirty_or_behind: bool,
     ) -> Result<RepoSummary> {
-        use crate::reporter::{html::HtmlReporter, markdown::MarkdownReporter, terminal::TerminalReporter, Reporter, save_report_async};
+        use crate::reporter::{
+            Reporter, html::HtmlReporter, markdown::MarkdownReporter, save_report_async,
+            terminal::TerminalReporter,
+        };
 
-        let repos = Scanner::scan_all(sources, db, false, crate::utils::DEFAULT_MAX_CONCURRENT_SCAN).await?;
+        let repos = Scanner::scan_all(
+            sources,
+            db,
+            false,
+            crate::utils::DEFAULT_MAX_CONCURRENT_SCAN,
+        )
+        .await?;
 
         if repos.is_empty() {
             anyhow::bail!("未找到 Git 仓库");
         }
 
         let filtered_repos: Vec<_> = if only_dirty_or_behind {
-            repos.iter()
+            repos
+                .iter()
                 .filter(|r| r.freshness == Freshness::HasUpdates || r.dirty)
                 .cloned()
                 .collect()
@@ -688,7 +872,11 @@ impl WorkflowExecutor {
             repos.clone()
         };
 
-        let report_repos = if only_dirty_or_behind { &filtered_repos } else { &repos };
+        let report_repos = if only_dirty_or_behind {
+            &filtered_repos
+        } else {
+            &repos
+        };
 
         let mut summary = RepoSummary::new();
         for repo in report_repos {
@@ -775,6 +963,126 @@ impl WorkflowExecutor {
         }
     }
 
+    /// 在 pull/reset 前执行真实远程差异安全扫描。
+    ///
+    /// fetch 之前本地还没有最新远程对象，无法可靠分析敏感文件、可疑代码和未知提交者。
+    /// 因此这里在 workflow 的 fetch + scan 之后、实际 merge/reset 之前比较 `HEAD`
+    /// 与 upstream tracking ref，发现高风险时默认跳过，避免风险提交进入工作区。
+    async fn filter_repos_by_pull_security(
+        &self,
+        repos: Vec<crate::models::Repository>,
+    ) -> Result<(Vec<crate::models::Repository>, Vec<String>)> {
+        use std::io::{IsTerminal, Write};
+
+        if !self.security_check || repos.is_empty() {
+            return Ok((repos, Vec::new()));
+        }
+
+        let mut allowed = Vec::new();
+        let mut skipped = Vec::new();
+
+        if !self.silent {
+            println!("  ├─ {} 正在执行 Pull 前安全扫描...", "🛡️".blue());
+        }
+
+        for repo in repos {
+            if crate::signal_handler::is_shutdown_requested() {
+                anyhow::bail!("用户中断，停止安全扫描");
+            }
+
+            let path = std::path::PathBuf::from(&repo.path);
+            let scan_result = match tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                tokio::task::spawn_blocking(move || Self::scan_repo_before_pull(&path)),
+            )
+            .await
+            {
+                Ok(Ok(Ok(result))) => Ok(result),
+                Ok(Ok(Err(e))) => Err(e),
+                Ok(Err(_)) => Err(anyhow::anyhow!("安全扫描任务 panic")),
+                Err(_) => Err(anyhow::anyhow!("安全扫描超时（30 秒）")),
+            };
+
+            match scan_result {
+                Ok((true, report)) => {
+                    if !self.silent && !report.is_empty() && report.contains("安全警告") {
+                        println!("{report}");
+                    }
+                    allowed.push(repo);
+                }
+                Ok((false, report)) => {
+                    if !self.silent && !report.is_empty() {
+                        println!("{report}");
+                    }
+
+                    let mut continue_pull = false;
+                    if !self.auto_skip_high_risk && !self.silent && std::io::stdin().is_terminal() {
+                        print!("是否仍然继续 Pull 高风险仓库 '{}'? [y/N] ", repo.name);
+                        std::io::stdout().flush()?;
+                        let mut input = String::new();
+                        std::io::stdin().read_line(&mut input)?;
+                        continue_pull = input.trim().eq_ignore_ascii_case("y");
+                    }
+
+                    if continue_pull {
+                        allowed.push(repo);
+                    } else {
+                        if !self.silent {
+                            println!("  │  {} 已跳过高风险仓库: {}", "⚠".yellow(), repo.name);
+                        }
+                        skipped.push(repo.name);
+                    }
+                }
+                Err(e) => {
+                    if !self.silent {
+                        eprintln!(
+                            "  │  {} 安全扫描失败，已跳过 '{}': {}",
+                            "⚠".yellow(),
+                            repo.name,
+                            e
+                        );
+                    }
+                    skipped.push(repo.name);
+                }
+            }
+        }
+
+        Ok((allowed, skipped))
+    }
+
+    /// 扫描单个仓库的 HEAD -> upstream tracking ref 差异。
+    ///
+    /// 返回 `(is_safe, report)`；没有 upstream 或没有目标提交时按安全处理，
+    /// 因为这类仓库不会进入 behind pull 流程。
+    fn scan_repo_before_pull(path: &std::path::Path) -> Result<(bool, String)> {
+        let repo = git2::Repository::open(path)?;
+        let local_oid = repo.head().ok().and_then(|head| head.target());
+        let remote_oid = Self::resolve_upstream_oid(&repo);
+
+        let (Some(local_oid), Some(remote_oid)) = (local_oid, remote_oid) else {
+            return Ok((true, String::new()));
+        };
+
+        if local_oid == remote_oid {
+            return Ok((true, String::new()));
+        }
+
+        let result = SecurityScanner::scan_before_fetch(path, Some(local_oid), Some(remote_oid))?;
+        let report = format_security_report(&result);
+        Ok((result.is_safe, report))
+    }
+
+    /// 解析当前分支的 upstream tracking ref OID。
+    fn resolve_upstream_oid(repo: &git2::Repository) -> Option<git2::Oid> {
+        let head = repo.head().ok()?;
+        let branch_name = head.shorthand()?;
+        let branch = repo
+            .find_branch(branch_name, git2::BranchType::Local)
+            .ok()?;
+        let upstream = branch.upstream().ok()?;
+        upstream.get().target()
+    }
+
     /// Execute safe pull (clean repositories only)
     #[allow(clippy::type_complexity)]
     async fn execute_pull_safe(
@@ -788,18 +1096,19 @@ impl WorkflowExecutor {
         // Concurrency control uses standard library synchronization primitives
 
         let all_repos = db.list_repositories()?;
-        let source_paths: std::collections::HashSet<_> = sources.iter()
-            .map(|s| s.root_path.as_str())
-            .collect();
+        let source_paths: std::collections::HashSet<_> =
+            sources.iter().map(|s| s.root_path.as_str()).collect();
 
-        let repos: Vec<_> = all_repos.into_iter()
+        let repos: Vec<_> = all_repos
+            .into_iter()
             .filter(|r| source_paths.contains(r.root_path.as_str()))
             .collect();
         if repos.is_empty() {
             anyhow::bail!("未找到仓库");
         }
 
-        let (behind_repos, up_to_date_repos): (Vec<_>, Vec<_>) = repos.into_iter()
+        let (behind_repos, up_to_date_repos): (Vec<_>, Vec<_>) = repos
+            .into_iter()
             .partition(|r| r.freshness == Freshness::HasUpdates);
 
         if behind_repos.is_empty() {
@@ -826,7 +1135,7 @@ impl WorkflowExecutor {
                 println!();
                 println!("{} 变更仓库详情:", "📋".cyan());
                 println!();
-                
+
                 // Show tree hierarchy
                 for (i, repo_info) in dirty_repos.iter().enumerate() {
                     let is_last = i == dirty_repos.len() - 1;
@@ -835,7 +1144,7 @@ impl WorkflowExecutor {
                         println!();
                     }
                 }
-                
+
                 println!();
                 println!("💡 建议:");
                 println!("   ├─ 运行 'pull-force' 自动 stash → pull → pop");
@@ -843,14 +1152,13 @@ impl WorkflowExecutor {
                 println!("   └─ 或手动处理后再运行 'pull-safe'");
             }
             let mut result = PullSafeResult::new();
-            result.dirty_repos = dirty_repos.into_iter()
-                .map(repo_to_dirty_info)
-                .collect();
+            result.dirty_repos = dirty_repos.into_iter().map(repo_to_dirty_info).collect();
             return Ok(result);
         }
 
         // Pull safety check (prevents repo deletion)
-        let mut unsafe_repos: Vec<(crate::models::Repository, crate::git::PullSafetyReport)> = Vec::new();
+        let mut unsafe_repos: Vec<(crate::models::Repository, crate::git::PullSafetyReport)> =
+            Vec::new();
 
         if self.pull_safety_check {
             if !self.silent && !self.dry_run {
@@ -868,12 +1176,18 @@ impl WorkflowExecutor {
                     std::time::Duration::from_secs(30),
                     tokio::task::spawn_blocking(move || {
                         crate::git::GitOps::check_pull_safety(&path)
-                    })
-                ).await {
+                    }),
+                )
+                .await
+                {
                     Ok(Ok(Ok(report))) => Ok(report),
                     Ok(Ok(Err(e))) => Err(e),
-                    Ok(Err(_)) => Err(crate::error::GetLatestRepoError::Other(anyhow::anyhow!("安全检查任务 panic"))),
-                    Err(_) => Err(crate::error::GetLatestRepoError::Other(anyhow::anyhow!("安全检查超时（30 秒）"))),
+                    Ok(Err(_)) => Err(crate::error::GetLatestRepoError::Other(anyhow::anyhow!(
+                        "安全检查任务 panic"
+                    ))),
+                    Err(_) => Err(crate::error::GetLatestRepoError::Other(anyhow::anyhow!(
+                        "安全检查超时（30 秒）"
+                    ))),
                 };
                 match result {
                     Ok(report) => {
@@ -882,28 +1196,33 @@ impl WorkflowExecutor {
                         }
                     }
                     Err(e) => {
-                        unsafe_repos.push((repo, crate::git::PullSafetyReport {
-                            is_safe: false,
-                            remote_commits: 0,
-                            previous_remote_commits: 0,
-                            change_ratio: 0.0,
-                            warning: Some(format!("安全检查失败: {}", e)),
-                            details: vec![],
-                        }));
+                        unsafe_repos.push((
+                            repo,
+                            crate::git::PullSafetyReport {
+                                is_safe: false,
+                                remote_commits: 0,
+                                previous_remote_commits: 0,
+                                change_ratio: 0.0,
+                                warning: Some(format!("安全检查失败: {}", e)),
+                                details: vec![],
+                            },
+                        ));
                     }
                 }
             }
 
             if !unsafe_repos.is_empty() {
-                let unsafe_names: std::collections::HashSet<_> = unsafe_repos
-                    .iter()
-                    .map(|(r, _)| r.name.clone())
-                    .collect();
+                let unsafe_names: std::collections::HashSet<_> =
+                    unsafe_repos.iter().map(|(r, _)| r.name.clone()).collect();
                 clean_repos.retain(|r| !unsafe_names.contains(&r.name));
 
                 if !self.silent {
                     println!("  │");
-                    println!("  ├─ {} 跳过 {} 个高风险仓库:", "🚨".red(), unsafe_repos.len());
+                    println!(
+                        "  ├─ {} 跳过 {} 个高风险仓库:",
+                        "🚨".red(),
+                        unsafe_repos.len()
+                    );
                     for (repo, report) in &unsafe_repos {
                         if let Some(ref warning) = report.warning {
                             println!("  │    ⚠ {}: {}", repo.name.red().bold(), warning);
@@ -914,23 +1233,45 @@ impl WorkflowExecutor {
 
                     if clean_repos.is_empty() {
                         println!("  │");
-                        println!("  └─ {}", "所有落后远程的仓库都有风险或本地变更，无法安全 Pull".yellow());
+                        println!(
+                            "  └─ {}",
+                            "所有落后远程的仓库都有风险或本地变更，无法安全 Pull".yellow()
+                        );
                         let mut result = PullSafeResult::new();
-                        result.dirty_repos = dirty_repos.into_iter()
-                            .map(repo_to_dirty_info)
-                            .collect();
+                        result.dirty_repos =
+                            dirty_repos.into_iter().map(repo_to_dirty_info).collect();
                         return Ok(result);
                     }
 
                     println!("  │");
-                    println!("  ├─ {} {} 个安全仓库将继续 Pull", "✓".green(), clean_repos.len());
+                    println!(
+                        "  ├─ {} {} 个安全仓库将继续 Pull",
+                        "✓".green(),
+                        clean_repos.len()
+                    );
                 } else if clean_repos.is_empty() {
                     let mut result = PullSafeResult::new();
-                    result.dirty_repos = dirty_repos.into_iter()
-                        .map(repo_to_dirty_info)
-                        .collect();
+                    result.dirty_repos = dirty_repos.into_iter().map(repo_to_dirty_info).collect();
                     return Ok(result);
                 }
+            }
+        }
+
+        let mut security_skipped_repos = Vec::new();
+        if !self.dry_run {
+            let (filtered, skipped) = self.filter_repos_by_pull_security(clean_repos).await?;
+            clean_repos = filtered;
+            security_skipped_repos = skipped;
+
+            if clean_repos.is_empty() {
+                let mut result = PullSafeResult::new();
+                result.dirty_repos = dirty_repos.into_iter().map(repo_to_dirty_info).collect();
+                result.skipped_repos = up_to_date_repos
+                    .into_iter()
+                    .map(|r| r.name)
+                    .chain(security_skipped_repos)
+                    .collect();
+                return Ok(result);
             }
         }
 
@@ -944,30 +1285,42 @@ impl WorkflowExecutor {
                     println!("  │");
                     println!("  │ {} 将跳过的仓库（存在本地变更）:", "○".dimmed());
                     println!("  │");
-                    
+
                     for (i, repo) in dirty_repos.iter().enumerate() {
                         let is_last = i == dirty_repos.len() - 1;
-                        let repo_connector = if is_last { "  │   └─" } else { "  │   ├─" };
-                        
-                        println!("{} 📦 {}", 
-                            repo_connector,
-                            repo.name.dimmed()
-                        );
-                        
-                        let meta_connector = if is_last { "  │       " } else { "  │   │   " };
+                        let repo_connector = if is_last {
+                            "  │   └─"
+                        } else {
+                            "  │   ├─"
+                        };
+
+                        println!("{} 📦 {}", repo_connector, repo.name.dimmed());
+
+                        let meta_connector = if is_last {
+                            "  │       "
+                        } else {
+                            "  │   │   "
+                        };
                         let branch_info = repo.branch.as_deref().unwrap_or("未知");
-                        println!("{}{} [{}]（{} 个文件）", 
+                        println!(
+                            "{}{} [{}]（{} 个文件）",
                             meta_connector,
                             "🌿".dimmed(),
                             branch_info.dimmed(),
                             repo.file_changes.len()
                         );
-                        
+
                         // Show the first few changed files
                         for (j, change) in repo.file_changes.iter().take(2).enumerate() {
-                            let is_last_file = is_last && j == repo.file_changes.len().min(2) - 1 && repo.file_changes.len() <= 2;
-                            let file_connector = if is_last_file { "  │           └─" } else { "  │           ├─" };
-                            
+                            let is_last_file = is_last
+                                && j == repo.file_changes.len().min(2) - 1
+                                && repo.file_changes.len() <= 2;
+                            let file_connector = if is_last_file {
+                                "  │           └─"
+                            } else {
+                                "  │           ├─"
+                            };
+
                             let status_icon = match change.status.as_str() {
                                 "added" => "✚",
                                 "deleted" => "✗",
@@ -975,17 +1328,23 @@ impl WorkflowExecutor {
                                 "renamed" => "➜",
                                 _ => "?",
                             };
-                            
-                            println!("{} {} {}", 
+
+                            println!(
+                                "{} {} {}",
                                 file_connector,
                                 status_icon,
                                 change.path.dimmed()
                             );
                         }
-                        
+
                         if repo.file_changes.len() > 2 {
-                            let more_connector = if is_last { "  │           └─" } else { "  │           ├─" };
-                            println!("{} ... 以及 {} 个文件", 
+                            let more_connector = if is_last {
+                                "  │           └─"
+                            } else {
+                                "  │           ├─"
+                            };
+                            println!(
+                                "{} ... 以及 {} 个文件",
                                 more_connector,
                                 repo.file_changes.len() - 2
                             );
@@ -1005,7 +1364,8 @@ impl WorkflowExecutor {
                     println!("  │");
                     println!("  │ {} 将更新的仓库（安全）:", "▶".green());
                     for repo in &clean_repos {
-                        println!("  │   • {}（落后 {} 个提交）",
+                        println!(
+                            "  │   • {}（落后 {} 个提交）",
                             repo.name.green(),
                             repo.behind_count.to_string().yellow()
                         );
@@ -1017,9 +1377,7 @@ impl WorkflowExecutor {
             }
 
             let mut result = PullSafeResult::new();
-            result.dirty_repos = dirty_repos.into_iter()
-                .map(repo_to_dirty_info)
-                .collect();
+            result.dirty_repos = dirty_repos.into_iter().map(repo_to_dirty_info).collect();
             result.skipped_repos = up_to_date_repos.into_iter().map(|r| r.name).collect();
             return Ok(result);
         }
@@ -1027,38 +1385,50 @@ impl WorkflowExecutor {
         // Confirmation prompt
         if confirm && !self.silent && !clean_repos.is_empty() {
             println!();
-            println!("{} 将更新以下 {} 个干净仓库:", "▶".cyan(), clean_repos.len());
+            println!(
+                "{} 将更新以下 {} 个干净仓库:",
+                "▶".cyan(),
+                clean_repos.len()
+            );
             for repo in &clean_repos {
                 println!("   - {}（落后 {} 个提交）", repo.name, repo.behind_count);
             }
             if !dirty_repos.is_empty() {
                 println!();
-                println!("{} 以下 {} 个仓库存在本地变更，将被跳过:", "!".yellow(), dirty_repos.len());
+                println!(
+                    "{} 以下 {} 个仓库存在本地变更，将被跳过:",
+                    "!".yellow(),
+                    dirty_repos.len()
+                );
                 println!();
-                
+
                 for (i, repo_info) in dirty_repos.iter().enumerate() {
                     let is_last = i == dirty_repos.len() - 1;
                     let repo_connector = if is_last { "└─" } else { "├─" };
-                    
-                    println!("   {} 📦 {}", 
-                        repo_connector,
-                        repo_info.name
-                    );
-                    
+
+                    println!("   {} 📦 {}", repo_connector, repo_info.name);
+
                     let meta_connector = if is_last { "      " } else { "   │  " };
                     let branch_info = repo_info.branch.as_deref().unwrap_or("未知");
-                    println!("{} {} [{}]（{} 个文件）", 
+                    println!(
+                        "{} {} [{}]（{} 个文件）",
                         meta_connector,
                         "🌿".dimmed(),
                         branch_info,
                         repo_info.file_changes.len()
                     );
-                    
+
                     // Show the first 3 changed files
                     for (j, change) in repo_info.file_changes.iter().take(3).enumerate() {
-                        let is_last_file = is_last && j == repo_info.file_changes.len().min(3) - 1 && repo_info.file_changes.len() <= 3;
-                        let file_connector = if is_last_file { "       └─" } else { "       ├─" };
-                        
+                        let is_last_file = is_last
+                            && j == repo_info.file_changes.len().min(3) - 1
+                            && repo_info.file_changes.len() <= 3;
+                        let file_connector = if is_last_file {
+                            "       └─"
+                        } else {
+                            "       ├─"
+                        };
+
                         let status_icon = match change.status.as_str() {
                             "added" => "✚",
                             "deleted" => "✗",
@@ -1066,20 +1436,33 @@ impl WorkflowExecutor {
                             "renamed" => "➜",
                             _ => "?",
                         };
-                        
-                        println!("{}{} {} {}", 
+
+                        println!(
+                            "{}{} {} {}",
                             file_connector,
                             status_icon,
                             change.path,
-                            if change.staged { "（已暂存）".green() } else { "（未暂存）".dimmed() }
+                            if change.staged {
+                                "（已暂存）".green()
+                            } else {
+                                "（未暂存）".dimmed()
+                            }
                         );
                     }
-                    
+
                     if repo_info.file_changes.len() > 3 {
-                        let more_connector = if is_last { "       └─" } else { "       ├─" };
-                        println!("{} ... 以及 {} 个文件", more_connector, repo_info.file_changes.len() - 3);
+                        let more_connector = if is_last {
+                            "       └─"
+                        } else {
+                            "       ├─"
+                        };
+                        println!(
+                            "{} ... 以及 {} 个文件",
+                            more_connector,
+                            repo_info.file_changes.len() - 3
+                        );
                     }
-                    
+
                     if !is_last {
                         println!();
                     }
@@ -1108,9 +1491,10 @@ impl WorkflowExecutor {
         // - Uses blocking wait (no busy-wait)
         // - Reasonable timeout
         use crate::concurrent::execute_concurrent_raw;
-        
+
         // 若启用 diff_after，预先记录 pull 前的 HEAD OID，用于精确显示新增提交
-        let mut original_oids: std::collections::HashMap<String, git2::Oid> = std::collections::HashMap::new();
+        let mut original_oids: std::collections::HashMap<String, git2::Oid> =
+            std::collections::HashMap::new();
         if diff_after {
             for repo in &clean_repos {
                 let path = std::path::PathBuf::from(&repo.path);
@@ -1138,19 +1522,22 @@ impl WorkflowExecutor {
             .collect();
 
         // Execute concurrent tasks
-        let results: Vec<Option<(String, String, Result<(), crate::error::GetLatestRepoError>)>> = execute_concurrent_raw(tasks, jobs);
+        let results: Vec<Option<(String, String, Result<(), crate::error::GetLatestRepoError>)>> =
+            execute_concurrent_raw(tasks, jobs);
 
         let mut pull_result = PullSafeResult::new();
-        pull_result.dirty_repos = dirty_repos.into_iter()
-            .map(repo_to_dirty_info)
+        pull_result.dirty_repos = dirty_repos.into_iter().map(repo_to_dirty_info).collect();
+        pull_result.skipped_repos = up_to_date_repos
+            .into_iter()
+            .map(|r| r.name)
+            .chain(security_skipped_repos)
             .collect();
-        pull_result.skipped_repos = up_to_date_repos.into_iter().map(|r| r.name).collect();
         let mut success_paths: Vec<(String, String)> = Vec::new();
 
         // Process results (None means panicked)
         for result in results {
             pull_result.total_count += 1;
-            
+
             match result {
                 Some((name, path, Ok(()))) => {
                     pull_result.success_count += 1;
@@ -1165,18 +1552,28 @@ impl WorkflowExecutor {
                             std::time::Duration::from_secs(30),
                             tokio::task::spawn_blocking(move || {
                                 crate::git::GitOps::inspect(&path_buf, &root_path)
-                            })
-                        ).await {
+                            }),
+                        )
+                        .await
+                        {
                             fresh.id = old_repo.id;
                             fresh.last_fetch_at = old_repo.last_fetch_at;
                             fresh.last_pull_at = Some(chrono::Local::now());
                             latest_time = fresh.last_commit_at;
                             if let Err(e) = db.upsert_repository(&mut fresh) {
-                                eprintln!("   ⚠️ 更新仓库状态失败 '{}': {}", crate::utils::sanitize_path(&path), e);
+                                eprintln!(
+                                    "   ⚠️ 更新仓库状态失败 '{}': {}",
+                                    crate::utils::sanitize_path(&path),
+                                    e
+                                );
                             } else {
                                 // Only update pull time after upsert succeeds
                                 if let Err(e) = db.update_pull_time(&path) {
-                                    eprintln!("   ⚠️ 更新 pull 时间失败 '{}': {}", crate::utils::sanitize_path(&path), e);
+                                    eprintln!(
+                                        "   ⚠️ 更新 pull 时间失败 '{}': {}",
+                                        crate::utils::sanitize_path(&path),
+                                        e
+                                    );
                                 }
                             }
                         }
@@ -1211,13 +1608,17 @@ impl WorkflowExecutor {
                         std::time::Duration::from_secs(30),
                         tokio::task::spawn_blocking(move || {
                             crate::git::GitOps::get_commits_since(&path_buf, since_oid)
-                        })
-                    ).await {
+                        }),
+                    )
+                    .await
+                    {
                         Ok(Ok(Ok(commits))) => {
                             pull_result.pulled_repos.push((name, commits));
                         }
                         _ => {
-                            pull_result.pulled_repos.push((name, vec!["(无法获取新增提交信息)".to_string()]));
+                            pull_result
+                                .pulled_repos
+                                .push((name, vec!["(无法获取新增提交信息)".to_string()]));
                         }
                     }
                 } else {
@@ -1226,13 +1627,17 @@ impl WorkflowExecutor {
                         std::time::Duration::from_secs(30),
                         tokio::task::spawn_blocking(move || {
                             crate::git::GitOps::get_recent_commits(&path_buf, 10)
-                        })
-                    ).await {
+                        }),
+                    )
+                    .await
+                    {
                         Ok(Ok(Ok(commits))) => {
                             pull_result.pulled_repos.push((name, commits));
                         }
                         _ => {
-                            pull_result.pulled_repos.push((name, vec!["(无法获取提交信息)".to_string()]));
+                            pull_result
+                                .pulled_repos
+                                .push((name, vec!["(无法获取提交信息)".to_string()]));
                         }
                     }
                 }
@@ -1254,18 +1659,19 @@ impl WorkflowExecutor {
         use crate::concurrent::execute_concurrent_raw;
 
         let all_repos = db.list_repositories()?;
-        let source_paths: std::collections::HashSet<_> = sources.iter()
-            .map(|s| s.root_path.as_str())
-            .collect();
+        let source_paths: std::collections::HashSet<_> =
+            sources.iter().map(|s| s.root_path.as_str()).collect();
 
-        let repos: Vec<_> = all_repos.into_iter()
+        let repos: Vec<_> = all_repos
+            .into_iter()
             .filter(|r| source_paths.contains(r.root_path.as_str()))
             .collect();
         if repos.is_empty() {
             anyhow::bail!("未找到仓库");
         }
 
-        let behind_repos: Vec<_> = repos.into_iter()
+        let mut behind_repos: Vec<_> = repos
+            .into_iter()
             .filter(|r| r.freshness == Freshness::HasUpdates)
             .collect();
 
@@ -1273,8 +1679,17 @@ impl WorkflowExecutor {
             return Ok(super::types::PullBackupResult::new());
         }
 
+        let (filtered_repos, _security_skipped) =
+            self.filter_repos_by_pull_security(behind_repos).await?;
+        behind_repos = filtered_repos;
+
+        if behind_repos.is_empty() {
+            return Ok(super::types::PullBackupResult::new());
+        }
+
         // 若启用 diff_after，预先记录 pull 前的 HEAD OID
-        let mut original_oids: std::collections::HashMap<String, git2::Oid> = std::collections::HashMap::new();
+        let mut original_oids: std::collections::HashMap<String, git2::Oid> =
+            std::collections::HashMap::new();
         if diff_after {
             for repo in &behind_repos {
                 let path = std::path::PathBuf::from(&repo.path);
@@ -1300,7 +1715,16 @@ impl WorkflowExecutor {
             })
             .collect();
 
-        let results: Vec<Option<(String, String, Result<(crate::git::PullForceOutcome, Option<String>), crate::error::GetLatestRepoError>)>> = execute_concurrent_raw(tasks, jobs);
+        let results: Vec<
+            Option<(
+                String,
+                String,
+                Result<
+                    (crate::git::PullForceOutcome, Option<String>),
+                    crate::error::GetLatestRepoError,
+                >,
+            )>,
+        > = execute_concurrent_raw(tasks, jobs);
 
         let mut pull_result = super::types::PullBackupResult::new();
         let mut success_paths: Vec<(String, String)> = Vec::new();
@@ -1325,17 +1749,27 @@ impl WorkflowExecutor {
                             std::time::Duration::from_secs(30),
                             tokio::task::spawn_blocking(move || {
                                 crate::git::GitOps::inspect(&path_buf, &root_path)
-                            })
-                        ).await {
+                            }),
+                        )
+                        .await
+                        {
                             fresh.id = old_repo.id;
                             fresh.last_fetch_at = old_repo.last_fetch_at;
                             fresh.last_pull_at = Some(chrono::Local::now());
                             latest_time = fresh.last_commit_at;
                             if let Err(e) = db.upsert_repository(&mut fresh) {
-                                eprintln!("   ⚠️ 更新仓库状态失败 '{}': {}", crate::utils::sanitize_path(&path), e);
+                                eprintln!(
+                                    "   ⚠️ 更新仓库状态失败 '{}': {}",
+                                    crate::utils::sanitize_path(&path),
+                                    e
+                                );
                             } else {
                                 if let Err(e) = db.update_pull_time(&path) {
-                                    eprintln!("   ⚠️ 更新 pull 时间失败 '{}': {}", crate::utils::sanitize_path(&path), e);
+                                    eprintln!(
+                                        "   ⚠️ 更新 pull 时间失败 '{}': {}",
+                                        crate::utils::sanitize_path(&path),
+                                        e
+                                    );
                                 }
                             }
                         }
@@ -1343,7 +1777,18 @@ impl WorkflowExecutor {
                     let time_str = latest_time.map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
                     pull_result.success_repos.push((name, time_str));
                 }
-                Some((name, path, Ok((crate::git::PullForceOutcome::Conflict { stash_name, conflict_files, stash_index }, archive_ref)))) => {
+                Some((
+                    name,
+                    path,
+                    Ok((
+                        crate::git::PullForceOutcome::Conflict {
+                            stash_name,
+                            conflict_files,
+                            stash_index,
+                        },
+                        archive_ref,
+                    )),
+                )) => {
                     pull_result.failed_count += 1;
                     if let Some(ref ar) = archive_ref {
                         pull_result.archived_repos.push((name.clone(), ar.clone()));
@@ -1384,8 +1829,10 @@ impl WorkflowExecutor {
                     std::time::Duration::from_secs(30),
                     tokio::task::spawn_blocking(move || {
                         crate::git::GitOps::inspect(&path_buf, &root_path)
-                    })
-                ).await {
+                    }),
+                )
+                .await
+                {
                     fresh.id = old_repo.id;
                     fresh.last_fetch_at = old_repo.last_fetch_at;
                     fresh.last_pull_at = Some(chrono::Local::now());
@@ -1405,13 +1852,17 @@ impl WorkflowExecutor {
                         std::time::Duration::from_secs(30),
                         tokio::task::spawn_blocking(move || {
                             crate::git::GitOps::get_commits_since(&path_buf, since_oid)
-                        })
-                    ).await {
+                        }),
+                    )
+                    .await
+                    {
                         Ok(Ok(Ok(commits))) => {
                             pull_result.pulled_repos.push((name, commits));
                         }
                         _ => {
-                            pull_result.pulled_repos.push((name, vec!["(无法获取新增提交信息)".to_string()]));
+                            pull_result
+                                .pulled_repos
+                                .push((name, vec!["(无法获取新增提交信息)".to_string()]));
                         }
                     }
                 } else {
@@ -1419,13 +1870,17 @@ impl WorkflowExecutor {
                         std::time::Duration::from_secs(30),
                         tokio::task::spawn_blocking(move || {
                             crate::git::GitOps::get_recent_commits(&path_buf, 10)
-                        })
-                    ).await {
+                        }),
+                    )
+                    .await
+                    {
                         Ok(Ok(Ok(commits))) => {
                             pull_result.pulled_repos.push((name, commits));
                         }
                         _ => {
-                            pull_result.pulled_repos.push((name, vec!["(无法获取提交信息)".to_string()]));
+                            pull_result
+                                .pulled_repos
+                                .push((name, vec!["(无法获取提交信息)".to_string()]));
                         }
                     }
                 }
@@ -1447,18 +1902,19 @@ impl WorkflowExecutor {
         // Concurrency control uses standard library synchronization primitives
 
         let all_repos = db.list_repositories()?;
-        let source_paths: std::collections::HashSet<_> = sources.iter()
-            .map(|s| s.root_path.as_str())
-            .collect();
+        let source_paths: std::collections::HashSet<_> =
+            sources.iter().map(|s| s.root_path.as_str()).collect();
 
-        let repos: Vec<_> = all_repos.into_iter()
+        let repos: Vec<_> = all_repos
+            .into_iter()
             .filter(|r| source_paths.contains(r.root_path.as_str()))
             .collect();
         if repos.is_empty() {
             anyhow::bail!("未找到仓库");
         }
 
-        let behind_repos: Vec<_> = repos.into_iter()
+        let mut behind_repos: Vec<_> = repos
+            .into_iter()
             .filter(|r| r.freshness == Freshness::HasUpdates)
             .collect();
 
@@ -1466,8 +1922,17 @@ impl WorkflowExecutor {
             return Ok(PullForceResult::new());
         }
 
+        let (filtered_repos, _security_skipped) =
+            self.filter_repos_by_pull_security(behind_repos).await?;
+        behind_repos = filtered_repos;
+
+        if behind_repos.is_empty() {
+            return Ok(PullForceResult::new());
+        }
+
         // 若启用 diff_after，预先记录 pull 前的 HEAD OID，用于精确显示新增提交
-        let mut original_oids: std::collections::HashMap<String, git2::Oid> = std::collections::HashMap::new();
+        let mut original_oids: std::collections::HashMap<String, git2::Oid> =
+            std::collections::HashMap::new();
         if diff_after {
             for repo in &behind_repos {
                 let path = std::path::PathBuf::from(&repo.path);
@@ -1498,7 +1963,13 @@ impl WorkflowExecutor {
             .collect();
 
         // Execute concurrent tasks
-        let results: Vec<Option<(String, String, Result<crate::git::PullForceOutcome, crate::error::GetLatestRepoError>)>> = execute_concurrent_raw(tasks, jobs);
+        let results: Vec<
+            Option<(
+                String,
+                String,
+                Result<crate::git::PullForceOutcome, crate::error::GetLatestRepoError>,
+            )>,
+        > = execute_concurrent_raw(tasks, jobs);
 
         let mut pull_result = PullForceResult::new();
         let mut success_paths: Vec<(String, String)> = Vec::new();
@@ -1506,21 +1977,31 @@ impl WorkflowExecutor {
         // Process results (None means panicked)
         for result in results {
             pull_result.total_count += 1;
-            
+
             match result {
                 Some((name, path, Ok(crate::git::PullForceOutcome::Success))) => {
                     pull_result.success_count += 1;
                     success_paths.push((name, path));
                 }
-                Some((name, path, Ok(crate::git::PullForceOutcome::Conflict { stash_name, conflict_files, stash_index }))) => {
-                    pull_result.failed_count += 1;
-                    pull_result.conflict_repos.push(crate::workflow::types::ConflictInfo {
-                        name: name.clone(),
-                        path: path.clone(),
-                        stash_message: stash_name,
+                Some((
+                    name,
+                    path,
+                    Ok(crate::git::PullForceOutcome::Conflict {
+                        stash_name,
                         conflict_files,
                         stash_index,
-                    });
+                    }),
+                )) => {
+                    pull_result.failed_count += 1;
+                    pull_result
+                        .conflict_repos
+                        .push(crate::workflow::types::ConflictInfo {
+                            name: name.clone(),
+                            path: path.clone(),
+                            stash_message: stash_name,
+                            conflict_files,
+                            stash_index,
+                        });
                 }
                 Some((name, _, Err(e))) => {
                     pull_result.failed_count += 1;
@@ -1546,8 +2027,10 @@ impl WorkflowExecutor {
                     std::time::Duration::from_secs(30),
                     tokio::task::spawn_blocking(move || {
                         crate::git::GitOps::inspect(&path_buf, &root_path)
-                    })
-                ).await {
+                    }),
+                )
+                .await
+                {
                     fresh.id = old_repo.id;
                     fresh.last_fetch_at = old_repo.last_fetch_at;
                     fresh.last_pull_at = Some(chrono::Local::now());
@@ -1556,7 +2039,11 @@ impl WorkflowExecutor {
                     } else {
                         // Only update pull time after upsert succeeds
                         if let Err(e) = db.update_pull_time(path) {
-                            eprintln!("   ⚠️ 更新 pull 时间失败 '{}': {}", crate::utils::sanitize_path(path), e);
+                            eprintln!(
+                                "   ⚠️ 更新 pull 时间失败 '{}': {}",
+                                crate::utils::sanitize_path(path),
+                                e
+                            );
                         }
                     }
                 }
@@ -1572,8 +2059,10 @@ impl WorkflowExecutor {
                     std::time::Duration::from_secs(30),
                     tokio::task::spawn_blocking(move || {
                         crate::git::GitOps::inspect(&path_buf, &root_path)
-                    })
-                ).await {
+                    }),
+                )
+                .await
+                {
                     fresh.id = old_repo.id;
                     fresh.last_fetch_at = old_repo.last_fetch_at;
                     fresh.last_pull_at = Some(chrono::Local::now());
@@ -1593,13 +2082,17 @@ impl WorkflowExecutor {
                         std::time::Duration::from_secs(30),
                         tokio::task::spawn_blocking(move || {
                             crate::git::GitOps::get_commits_since(&path_buf, since_oid)
-                        })
-                    ).await {
+                        }),
+                    )
+                    .await
+                    {
                         Ok(Ok(Ok(commits))) => {
                             pull_result.pulled_repos.push((name, commits));
                         }
                         _ => {
-                            pull_result.pulled_repos.push((name, vec!["(无法获取新增提交信息)".to_string()]));
+                            pull_result
+                                .pulled_repos
+                                .push((name, vec!["(无法获取新增提交信息)".to_string()]));
                         }
                     }
                 } else {
@@ -1608,13 +2101,17 @@ impl WorkflowExecutor {
                         std::time::Duration::from_secs(30),
                         tokio::task::spawn_blocking(move || {
                             crate::git::GitOps::get_recent_commits(&path_buf, 10)
-                        })
-                    ).await {
+                        }),
+                    )
+                    .await
+                    {
                         Ok(Ok(Ok(commits))) => {
                             pull_result.pulled_repos.push((name, commits));
                         }
                         _ => {
-                            pull_result.pulled_repos.push((name, vec!["(无法获取提交信息)".to_string()]));
+                            pull_result
+                                .pulled_repos
+                                .push((name, vec!["(无法获取提交信息)".to_string()]));
                         }
                     }
                 }
@@ -1638,14 +2135,22 @@ impl WorkflowExecutor {
                     println!("  [{}] Fetch", step_num);
                     println!("      并发: {} | 超时: {} 秒", jobs, timeout);
                 }
-                WorkflowStep::Scan { output, open, only_dirty_or_behind } => {
+                WorkflowStep::Scan {
+                    output,
+                    open,
+                    only_dirty_or_behind,
+                } => {
                     let output_name = match output {
                         OutputFormat::Terminal => "终端",
                         OutputFormat::Html => "HTML",
                         OutputFormat::Markdown => "Markdown",
                     };
                     println!("  [{}] Scan ({})", step_num, output_name);
-                    println!("      自动打开: {} | 只显示需关注仓库: {}", yes_no(*open), yes_no(*only_dirty_or_behind));
+                    println!(
+                        "      自动打开: {} | 只显示需关注仓库: {}",
+                        yes_no(*open),
+                        yes_no(*only_dirty_or_behind)
+                    );
                 }
                 WorkflowStep::Check { condition, .. } => {
                     let cond_name = match condition {
@@ -1656,7 +2161,11 @@ impl WorkflowExecutor {
                     };
                     println!("  [{}] Check ({})", step_num, cond_name);
                 }
-                WorkflowStep::PullSafe { jobs, confirm, diff_after } => {
+                WorkflowStep::PullSafe {
+                    jobs,
+                    confirm,
+                    diff_after,
+                } => {
                     let jobs = jobs.unwrap_or(self.jobs);
                     println!("  [{}] PullSafe", step_num);
                     println!("      策略: 只 Pull 干净仓库（ff-only）");
@@ -1676,7 +2185,9 @@ impl WorkflowExecutor {
                 WorkflowStep::PullBackup { jobs, diff_after } => {
                     let jobs = jobs.unwrap_or(self.jobs);
                     println!("  [{}] PullBackup", step_num);
-                    println!("      流程: stash（如有本地变更）→ git reset --hard origin/<branch> → stash pop");
+                    println!(
+                        "      流程: stash（如有本地变更）→ git reset --hard origin/<branch> → stash pop"
+                    );
                     println!("      策略: 严格镜像远程，可处理 force-push / rebase");
                     println!("      显示差异: {}", yes_no(*diff_after));
                     println!("      并发: {}", jobs);
@@ -1687,8 +2198,14 @@ impl WorkflowExecutor {
         }
 
         println!("{}", "参数覆盖:".dimmed());
-        println!("  并发: {}（默认: {}）", self.jobs, self.workflow.default_jobs);
-        println!("  超时: {} 秒（默认: {} 秒）", self.timeout, self.workflow.default_timeout);
+        println!(
+            "  并发: {}（默认: {}）",
+            self.jobs, self.workflow.default_jobs
+        );
+        println!(
+            "  超时: {} 秒（默认: {} 秒）",
+            self.timeout, self.workflow.default_timeout
+        );
     }
 }
 

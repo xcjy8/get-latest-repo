@@ -321,7 +321,7 @@
                     </div>
                     <div class="repo-badges">
                         <span class="badge branch">{{ repo.branch }}</span>
-                        <span class="badge status-{{ repo.status_class }}">
+                        <span class="badge {{ repo.status_class }}">
                             {{ repo.status_icon }} {{ repo.status_text }}
                         </span>
                         {% if repo.is_dirty %}

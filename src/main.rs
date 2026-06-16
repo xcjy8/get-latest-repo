@@ -53,6 +53,13 @@ fn acquire_process_lock() -> Result<ProcessLock> {
     let lock_path = dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("getlatestrepo.lock");
+
+    // cache 目录在精简系统、CI 或 HOME 被重定向时可能不存在。
+    // 先创建父目录，避免所有命令在真正解析 CLI 前就因为锁文件路径失败。
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("无法创建锁文件目录: {:?}", parent))?;
+    }
     
     #[cfg(unix)]
     {

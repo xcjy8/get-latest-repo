@@ -894,7 +894,7 @@ impl Fetcher {
             .with_context(|| format!("无法创建父目录: {}", parent.display()))?;
 
         // ── Two-phase atomic move ──────────────────────────────────────────────
-        if let Err(e) = fs::rename(from, &to_canonical) {
+        if let Err(e) = Self::move_or_copy_dir(Path::new(from), &to_canonical) {
             return Err(anyhow::anyhow!(
                 "无法将仓库从 '{}' 移动到 '{}': {}",
                 from, to_canonical.display(), e

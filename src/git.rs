@@ -485,18 +485,11 @@ impl GitOps {
             };
         }
         
-        // 404 repository not found
-        if msg.contains("404") || msg.contains("not found") || 
-           msg.contains("could not resolve") || msg.contains("repository not found") {
-            return FetchStatus::RepositoryNotFound { 
-                message: error_msg.to_string() 
-            };
-        }
-        
-        // Network/timeout errors
-        // Includes patterns from both git2 and native `git fetch` (curl/libcurl)
+        // 网络/超时错误。这里同时覆盖 git2 和原生 `git fetch`
+        // 可能返回的 curl/libcurl/OpenSSL/DNS 文案。
         if msg.contains("timeout") || msg.contains("timed out") ||
            msg.contains("connection refused") || msg.contains("couldn't connect") ||
+           msg.contains("could not resolve") || msg.contains("couldn't resolve") ||
            msg.contains("network") || msg.contains("unreachable") ||
            msg.contains("unable to access") || msg.contains("rpc failed") ||
            msg.contains("curl") || msg.contains("openssl") ||
@@ -505,8 +498,17 @@ impl GitOps {
                 message: error_msg.to_string() 
             };
         }
+
+        // 404 repository not found. DNS 解析失败必须在网络错误分支优先处理，
+        // 否则临时网络问题会被误判为私有/不存在仓库并触发 needauth 移动。
+        if msg.contains("404") || msg.contains("not found") || 
+           msg.contains("repository not found") {
+            return FetchStatus::RepositoryNotFound { 
+                message: error_msg.to_string() 
+            };
+        }
         
-        // Other errors
+        // 其他无法归类的错误保留原始信息，交给上层展示。
         FetchStatus::OtherError { 
             message: error_msg.to_string() 
         }
@@ -835,13 +837,32 @@ impl GitOps {
         }
     }
 
-    /// Find stash index by message
+    /// 判断仓库是否处于未合并索引状态。
+    ///
+    /// 未合并索引通常来自上一次 stash pop / merge / checkout 冲突。libgit2 无法
+    /// 对这种 index 创建 stash tree，会报 `cannot create a tree from a not fully merged index`。
+    /// `pull-backup` 的语义是镜像远程，因此这里把它作为“需要强制重置清理”的状态。
+    fn has_unmerged_index(repo: &git2::Repository) -> bool {
+        let mut opts = git2::StatusOptions::new();
+        opts.include_untracked(false);
+        match repo.statuses(Some(&mut opts)) {
+            Ok(statuses) => statuses
+                .iter()
+                .any(|entry| entry.status().contains(git2::Status::CONFLICTED)),
+            Err(e) => {
+                eprintln!("警告：检查未合并索引失败: {}", e);
+                false
+            }
+        }
+    }
+
+    /// 按 stash message 查找对应的 stash 序号。
     fn find_stash_index(repo: &mut git2::Repository, stash_name: &str) -> Option<usize> {
         let mut result = None;
         if let Err(e) = repo.stash_foreach(|index, message, _oid| {
             if message == stash_name {
                 result = Some(index);
-                false // stop iterating
+                false // 找到目标后立即停止遍历，避免继续扫描无关 stash。
             } else {
                 true
             }
@@ -851,16 +872,16 @@ impl GitOps {
         result
     }
 
-    /// Backup pull: archive → stash (if dirty) → hard reset to remote → pop stash
+    /// 备份同步：归档 → 必要时 stash → 硬重置到远程 → 恢复 stash。
     ///
-    /// Designed for "pure backup" scenarios where the user only clones and wants to
-    /// guarantee the local copy mirrors the remote exactly. Automatically handles:
-    /// - Remote history rewrites (force push / rebase): old history archived via refs
-    /// - Local uncommitted changes (auto stash → reset → pop)
+    /// 这个流程面向“本地只做镜像备份”的仓库：用户不在本地维护业务修改，
+    /// 只希望本地副本尽量严格匹配远程。它会自动处理两类常见风险：
+    /// - 远程历史被改写（force push / rebase）：先把旧 HEAD 归档到 refs。
+    /// - 本地存在未提交变更：先 stash，再 reset，最后尝试 stash pop。
     ///
-    /// Returns (PullForceOutcome, Option<archive_ref_name>).
-    /// The archive_ref_name is Some when remote history was rewritten and old HEAD
-    /// was preserved under refs/glr-archive/<branch>-<timestamp>.
+    /// 返回 `(PullForceOutcome, Option<archive_ref_name>)`。当远程历史改写会丢弃
+    /// 本地 HEAD 时，`archive_ref_name` 会指向 `refs/glr-archive/<branch>-<timestamp>`，
+    /// 方便用户事后审计或恢复旧历史。
     pub fn pull_backup(path: &Path) -> Result<(PullForceOutcome, Option<String>)> {
         let mut repo = Self::open(path)?;
 
@@ -870,26 +891,37 @@ impl GitOps {
             None => return Err(GetLatestRepoError::DetachedHead),
         };
 
-        // 0. Archive old history if it would be lost by hard reset
+        // 0. 如果硬重置会丢失本地历史，先创建归档引用。
         let archive_ref = Self::maybe_archive_before_reset(&mut repo, &branch_name)?;
 
-        // 1. Stash local changes if dirty
+        // 1. 只在普通 dirty 状态下保存本地变更；未合并索引无法创建 stash tree，
+        //    对备份模式来说应直接进入硬重置恢复路径。
         let (is_dirty, _) = Self::check_dirty(&repo)?;
-        let stash_name = if is_dirty {
+        let has_unmerged_index = Self::has_unmerged_index(&repo);
+        let stash_name = if is_dirty && !has_unmerged_index {
             let name = format!("getlatestrepo-backup-{}",
                 chrono::Local::now().format("%Y%m%d-%H%M%S"));
             let sig = repo.signature()?;
-            repo.stash_save(
+            match repo.stash_save(
                 &sig,
                 &name,
                 Some(git2::StashFlags::INCLUDE_UNTRACKED)
-            )?;
-            Some(name)
+            ) {
+                Ok(_) => Some(name),
+                Err(e) if Self::is_empty_stash_error(&e) => {
+                    eprintln!("   ℹ️ 检测到 dirty 状态但没有可 stash 的内容，继续执行备份同步。");
+                    None
+                }
+                Err(e) => return Err(e.into()),
+            }
         } else {
+            if has_unmerged_index {
+                eprintln!("   ⚠️ 检测到未合并索引，备份模式将跳过 stash 并硬重置到远程。");
+            }
             None
         };
 
-        // 2. Hard reset to remote branch (handles diverged history)
+        // 2. 硬重置到远程跟踪分支；这一步负责处理普通落后和分叉历史。
         let reset_result = (|| -> Result<()> {
             let remote_name = Self::get_remote_name(&repo)?
                 .unwrap_or_else(|| "origin".to_string());
@@ -900,22 +932,14 @@ impl GitOps {
             let remote_oid = remote_ref.target()
                 .ok_or_else(|| GetLatestRepoError::RemoteBranchNoTarget)?;
 
-            let remote_obj = repo.find_object(remote_oid, None)
-                .map_err(|e| GetLatestRepoError::Other(anyhow::anyhow!(
-                    "无法找到远程提交对象: {}", e)))?;
-
-            let mut hard_opts = git2::build::CheckoutBuilder::new();
-            hard_opts.force();
-            repo.reset(&remote_obj, git2::ResetType::Hard, Some(&mut hard_opts))
-                .map_err(|e| GetLatestRepoError::Other(anyhow::anyhow!(
-                    "硬重置到远程分支失败: {}", e)))?;
+            Self::reset_hard_to_remote(&repo, path, &remote_ref_name, remote_oid)?;
 
             Ok(())
         })();
 
         match reset_result {
             Ok(()) => {
-                // 3. Pop stash if created
+                // 3. 如果第 1 步创建了 stash，尝试恢复；冲突会被显式返回给上层展示。
                 if let Some(stash_name) = stash_name {
                     match repo.stash_pop(0, None) {
                         Ok(()) => Ok((PullForceOutcome::Success, archive_ref)),
@@ -940,6 +964,78 @@ impl GitOps {
                 Err(e)
             }
         }
+    }
+
+    /// 判断 stash 失败是否只是“没有可保存内容”。
+    ///
+    /// 部分仓库会被 status 判为 dirty，但 libgit2 在真正创建 stash 时发现没有
+    /// 可写入的变更。对 `pull-backup` 来说，这不应阻断后续 hard reset。
+    fn is_empty_stash_error(error: &git2::Error) -> bool {
+        error.code() == git2::ErrorCode::NotFound
+            && error.class() == git2::ErrorClass::Stash
+            && error.message().contains("nothing to stash")
+    }
+
+    /// 将本地分支硬重置到 upstream tracking ref。
+    ///
+    /// 优先使用 libgit2，保持和其他 Git 操作一致。若 libgit2 在检出超长 symlink
+    /// 时失败，则回退到原生 git，并临时禁用 symlink 检出，把 symlink 写成普通文件。
+    /// 这是为了兼容备份仓库中存在异常长 symlink target 的情况。
+    fn reset_hard_to_remote(
+        repo: &git2::Repository,
+        path: &Path,
+        remote_ref_name: &str,
+        remote_oid: git2::Oid,
+    ) -> Result<()> {
+        let remote_obj = repo.find_object(remote_oid, None)
+            .map_err(|e| GetLatestRepoError::Other(anyhow::anyhow!(
+                "无法找到远程提交对象: {}", e)))?;
+
+        let mut hard_opts = git2::build::CheckoutBuilder::new();
+        hard_opts.force();
+        match repo.reset(&remote_obj, git2::ResetType::Hard, Some(&mut hard_opts)) {
+            Ok(()) => Ok(()),
+            Err(e) if Self::is_symlink_filename_too_long_error(&e) => {
+                Self::reset_hard_with_native_git_no_symlinks(path, remote_ref_name)
+            }
+            Err(e) => Err(GetLatestRepoError::Other(anyhow::anyhow!(
+                "硬重置到远程分支失败: {}", e))),
+        }
+    }
+
+    /// 判断 hard reset 失败是否来自超长 symlink target。
+    ///
+    /// 这类错误不是仓库认证、网络或提交对象问题，而是当前文件系统无法创建
+    /// 目标过长的符号链接。备份模式可以安全地回退到 `core.symlinks=false`。
+    fn is_symlink_filename_too_long_error(error: &git2::Error) -> bool {
+        let message = error.message();
+        message.contains("could not create symlink") && message.contains("File name too long")
+    }
+
+    /// 使用原生 git 执行禁用 symlink 的硬重置回退。
+    ///
+    /// libgit2 没有等价于临时 `-c core.symlinks=false` 的 checkout 开关；
+    /// 因此只在明确识别出超长 symlink 错误后调用原生 git。该命令只修改目标
+    /// 仓库工作区，不触碰远程，也不会修改本项目仓库历史。
+    fn reset_hard_with_native_git_no_symlinks(path: &Path, remote_ref_name: &str) -> Result<()> {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(["-c", "core.symlinks=false", "reset", "--hard", remote_ref_name])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .map_err(|e| GetLatestRepoError::Other(anyhow::anyhow!(
+                "无法启动原生 git 回退重置: {}", e)))?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(GetLatestRepoError::Other(anyhow::anyhow!(
+            "硬重置到远程分支失败，且禁用 symlink 的原生 git 回退也失败: {}",
+            stderr.trim()
+        )))
     }
 
     /// Check if hard reset would lose local branch history, and create archive ref if so.
@@ -1576,5 +1672,83 @@ mod tests {
 
         let archives = list_archive_refs(&path);
         assert!(archives.is_empty(), "Should have no archive refs when up to date");
+    }
+
+    #[test]
+    fn test_pull_backup_recovers_unmerged_index() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path();
+
+        let run_git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .args(args)
+                .output()
+                .expect("git command should start");
+            assert!(
+                output.status.success(),
+                "git {:?} should succeed\nstdout: {}\nstderr: {}",
+                args,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+
+        run_git(&["init"]);
+        run_git(&["config", "user.email", "test@test.com"]);
+        run_git(&["config", "user.name", "Test"]);
+        std::fs::write(path.join("conflict.txt"), "base\n").unwrap();
+        run_git(&["add", "conflict.txt"]);
+        run_git(&["commit", "-m", "base"]);
+        run_git(&["branch", "-M", "main"]);
+
+        run_git(&["checkout", "-b", "remote-work"]);
+        std::fs::write(path.join("conflict.txt"), "remote\n").unwrap();
+        run_git(&["commit", "-am", "remote"]);
+        let remote_oid = std::process::Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        let remote_oid = String::from_utf8(remote_oid.stdout).unwrap();
+        run_git(&["update-ref", "refs/remotes/origin/main", remote_oid.trim()]);
+
+        run_git(&["checkout", "main"]);
+        std::fs::write(path.join("conflict.txt"), "local\n").unwrap();
+        run_git(&["commit", "-am", "local"]);
+
+        let merge_output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(["merge", "remote-work"])
+            .output()
+            .unwrap();
+        assert!(!merge_output.status.success(), "merge should create a conflict");
+
+        let result = GitOps::pull_backup(path);
+        assert!(
+            matches!(result, Ok((PullForceOutcome::Success, Some(_)))),
+            "pull-backup should hard reset conflicted backup repo, got: {:?}",
+            result
+        );
+
+        let repo = git2::Repository::open(path).unwrap();
+        let head_oid = repo.head().unwrap().target().unwrap().to_string();
+        assert_eq!(head_oid, remote_oid.trim());
+        assert_eq!(std::fs::read_to_string(path.join("conflict.txt")).unwrap(), "remote\n");
+    }
+
+    #[test]
+    fn test_classify_dns_resolution_as_network_error() {
+        let status = GitOps::classify_error(
+            "git fetch 失败（退出码 128）: fatal: unable to access 'https://github.com/a/b': Could not resolve host: github.com"
+        );
+
+        assert!(
+            matches!(status, FetchStatus::NetworkError { .. }),
+            "DNS 解析失败必须保持为网络错误，不能触发 needauth 移动"
+        );
     }
 }

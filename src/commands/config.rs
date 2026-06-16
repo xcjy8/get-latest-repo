@@ -1,10 +1,10 @@
 //! Config command handling
 
-use anyhow::Result;
-use colored::Colorize;
 use crate::cli::ConfigCommands;
 use crate::config::AppConfig;
 use crate::db::Database;
+use anyhow::Result;
+use colored::Colorize;
 
 /// Execute config command
 pub async fn execute(command: ConfigCommands) -> Result<()> {
@@ -40,20 +40,24 @@ pub async fn execute(command: ConfigCommands) -> Result<()> {
         }
         ConfigCommands::Remove { path_or_id } => {
             let mut config = AppConfig::load()?;
-
-            // Try to delete from database first
             let db = Database::open()?;
-            if let Ok(id) = path_or_id.parse::<i64>() {
-                db.delete_scan_source(id)?;
-            }
-            // Also update config file
-            // 若输入是路径，先 canonicalize 以匹配 add 时的存储格式
-            let canonicalized = if let Ok(path) = std::path::Path::new(&path_or_id).canonicalize() {
-                path.to_string_lossy().to_string()
+
+            // `config list` 展示的是 1-based 编号，不是 SQLite 内部 ID。
+            // 先更新 TOML 配置；成功后再按 root_path 删除 DB 记录，避免半途失败造成不一致。
+            let removed_path = if let Ok(index) = path_or_id.parse::<usize>() {
+                config.remove_scan_source_by_index(index)?.root_path
             } else {
-                path_or_id
+                let canonicalized =
+                    if let Ok(path) = std::path::Path::new(&path_or_id).canonicalize() {
+                        path.to_string_lossy().to_string()
+                    } else {
+                        path_or_id
+                    };
+                config.remove_scan_source(&canonicalized)?;
+                canonicalized
             };
-            config.remove_scan_source(&canonicalized)?;
+
+            db.delete_scan_source_by_path(&removed_path)?;
             println!("{} 已移除扫描源", "✓".green());
         }
         ConfigCommands::Ignore { patterns } => {
@@ -61,6 +65,11 @@ pub async fn execute(command: ConfigCommands) -> Result<()> {
             let pattern_list: Vec<String> =
                 patterns.split(',').map(|s| s.trim().to_string()).collect();
             config.set_ignore_patterns(pattern_list.clone())?;
+            let db = Database::open()?;
+            for source in &config.scan_sources {
+                let mut source_clone = source.clone();
+                db.upsert_scan_source(&mut source_clone)?;
+            }
             println!("{} 已设置忽略规则：{:?}", "✓".green(), pattern_list);
         }
         ConfigCommands::Path => {

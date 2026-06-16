@@ -35,7 +35,7 @@ If you maintain dozens or even hundreds of Git repositories, these scenarios wil
 | **Concurrent Fetch** | Tokio-based async concurrency, configurable parallelism and timeout, proxy support |
 | **Safe Pull** | `pull-safe` auto-skips repos with local changes; `pull-force` auto-stashes changes |
 | **Backup Sync** | `pull-backup` hard-resets to remote state, ideal for pure backup scenarios |
-| **Security Scan** | Pre-operation safety checks: detect sensitive file changes, suspicious code patterns, unknown committers |
+| **Security Scan** | Post-fetch, pre-pull remote-diff checks: sensitive files, suspicious code patterns, unknown committers |
 | **Workflow Engine** | 7 built-in workflows chaining fetch → scan → pull → report into end-to-end flows |
 | **Multi-format Reports** | Terminal table / HTML (dark theme) / Markdown, auto-archived by date |
 | **Process Lock** | Prevents multiple instances from running concurrently to avoid data races |
@@ -246,7 +246,7 @@ getlatestrepo workflow pull-force --dry-run
 
 ## Security Scan Mechanism
 
-Before executing network operations like fetch/pull, GetLatestRepo automatically runs a security pre-scan:
+GetLatestRepo fetches remote objects first without merging them into the working tree, then compares local `HEAD` with the upstream tracking ref before pull/reset:
 
 ### Detection Categories
 
@@ -264,7 +264,7 @@ Before executing network operations like fetch/pull, GetLatestRepo automatically
 | Medium | Prompt for confirmation |
 | High | Block operation |
 
-Security scanning can be disabled via the `--no-security-check` global flag.
+Pre-pull security scanning can be disabled via the `--no-security-check` global flag.
 
 ---
 
@@ -344,12 +344,13 @@ Use the `-d` flag to limit scan depth, or adjust `default_depth` in `config.toml
 
 ### Q: How to exclude specific directories?
 
-Set ignore rules via `getlatestrepo config ignore <patterns>`, supporting comma-separated patterns. By default, `node_modules`, `target`, `vendor` and other common directories are already ignored.
+Set ignore rules via `getlatestrepo config ignore <patterns>`, supporting comma-separated patterns. The command updates existing scan sources and future scan sources. By default, `node_modules`, `target`, `vendor` and other common directories are already ignored.
 
 ### Q: What's the difference between `pull-safe` and `pull-force`?
 
 - `pull-safe`: Only pulls clean repos (no local changes). Repos with changes are skipped.
 - `pull-force`: Auto-stashes local changes → pull → stash pop. Good for batch sync but may cause conflicts.
+- `pull-backup`: For pure backup mirrors. After fetch, it hard-resets to the remote tracking branch and tries to recover from an existing unmerged index, empty-stash state, or long symlink checkout failure with explicit diagnostics.
 
 ### Q: How to use in CI?
 

@@ -218,10 +218,24 @@ impl Database {
     }
 
     /// Delete scan source
+    #[allow(dead_code)]
     pub fn delete_scan_source(&self, id: i64) -> Result<()> {
         self.conn.execute(
             "DELETE FROM scan_sources WHERE id = ?1",
             params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Delete scan source by root path.
+    ///
+    /// The CLI displays scan sources from the TOML config, where SQLite row IDs are
+    /// not persisted back. Deleting by canonical root path keeps config and DB sync
+    /// deterministic even when the user removes an item by displayed list number.
+    pub fn delete_scan_source_by_path(&self, root_path: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM scan_sources WHERE root_path = ?1",
+            params![root_path],
         )?;
         Ok(())
     }
