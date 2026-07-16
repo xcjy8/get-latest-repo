@@ -262,6 +262,10 @@ pub struct ScanSourceDto {
 #[serde(rename_all = "camelCase")]
 pub struct ConfigDto {
     pub default_jobs: usize,
+    pub effective_fetch_jobs: usize,
+    pub effective_io_jobs: usize,
+    pub logical_cpus: usize,
+    pub memory_mib: Option<u64>,
     pub default_timeout: u64,
     pub default_depth: usize,
     pub ignore_patterns: Vec<String>,
@@ -276,8 +280,13 @@ pub struct FolderSelectionDto {
 
 impl From<crate::config::AppConfig> for ConfigDto {
     fn from(config: crate::config::AppConfig) -> Self {
+        let concurrency = crate::concurrent::AdaptiveConcurrency::detect(config.default_jobs);
         Self {
             default_jobs: config.default_jobs,
+            effective_fetch_jobs: concurrency.fetch_jobs,
+            effective_io_jobs: concurrency.io_jobs,
+            logical_cpus: concurrency.logical_cpus,
+            memory_mib: concurrency.memory_mib,
             default_timeout: config.default_timeout,
             default_depth: config.default_depth,
             ignore_patterns: config.ignore_patterns,

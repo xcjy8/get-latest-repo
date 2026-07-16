@@ -72,6 +72,7 @@ impl WebState {
 }
 
 pub async fn serve(
+    bind: std::net::IpAddr,
     port: u16,
     open_browser: bool,
     proxy: ProxyConfig,
@@ -131,11 +132,22 @@ pub async fn serve(
         ))
         .with_state(state.clone());
 
-    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let address = std::net::SocketAddr::new(bind, port);
     let listener = tokio::net::TcpListener::bind(address).await?;
-    let url = format!("http://127.0.0.1:{port}");
+    let browser_host = if bind.is_unspecified() {
+        "127.0.0.1".to_string()
+    } else if bind.is_ipv6() {
+        format!("[{bind}]")
+    } else {
+        bind.to_string()
+    };
+    let url = format!("http://{browser_host}:{port}");
     println!("✓ Web 控制台已启动：{url}");
-    println!("ℹ 数据仅通过本机回环地址传输，按 Ctrl+C 停止服务");
+    if bind.is_loopback() {
+        println!("ℹ 数据仅通过本机回环地址传输，按 Ctrl+C 停止服务");
+    } else {
+        println!("ℹ 服务正在监听容器网络接口，请仅通过受控端口映射访问");
+    }
     if open_browser {
         open_local_browser(&url);
     }
@@ -298,6 +310,21 @@ async fn select_scan_source_folder(State(state): State<WebState>, headers: Heade
     }
     if has_active_operation(&state) {
         return error_response(StatusCode::LOCKED, "仓库批量操作正在运行，暂不能修改扫描源");
+    }
+
+    // 容器无法弹出宿主机文件夹选择器；返回 Compose 已授权挂载的唯一目录。
+    if let Some(container_root) = std::env::var_os("GETLATESTREPO_CONTAINER_SCAN_ROOT") {
+        let path = std::path::PathBuf::from(container_root);
+        return match path.canonicalize() {
+            Ok(path) => Json(FolderSelectionDto {
+                path: path.to_string_lossy().into_owned(),
+            })
+            .into_response(),
+            Err(error) => error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Docker 扫描源挂载不可访问：{error}"),
+            ),
+        };
     }
 
     match tokio::task::spawn_blocking(open_scan_source_folder_dialog).await {
@@ -710,11 +737,11 @@ mod tests {
 
     #[test]
     fn csrf_token_has_sufficient_entropy_material() {
-        let state = WebState::new(38427, ProxyConfig::default(), true).unwrap();
+        let state = WebState::new(8615, ProxyConfig::default(), true).unwrap();
         assert!(state.csrf_token.len() >= 64);
         assert_ne!(
             state.csrf_token.as_ref(),
-            WebState::new(38427, ProxyConfig::default(), true)
+            WebState::new(8615, ProxyConfig::default(), true)
                 .unwrap()
                 .csrf_token
                 .as_ref()
@@ -729,7 +756,7 @@ mod tests {
             https_proxy: "http://127.0.0.1:19443".to_string(),
         };
 
-        let state = WebState::new(38427, proxy, false).unwrap();
+        let state = WebState::new(8615, proxy, false).unwrap();
 
         assert!(state.proxy.enabled);
         assert_eq!(state.proxy.https_proxy, "http://127.0.0.1:19443");
@@ -781,7 +808,7 @@ mod tests {
 
     #[test]
     fn repository_id_snapshot_reports_only_removed_ids() {
-        let state = WebState::new(38427, ProxyConfig::default(), true).unwrap();
+        let state = WebState::new(8615, ProxyConfig::default(), true).unwrap();
         assert!(
             state
                 .replace_repository_ids(HashSet::from(["1".to_string(), "2".to_string()]))

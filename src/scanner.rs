@@ -9,6 +9,8 @@ use crate::db::Database;
 use crate::git::GitOps;
 use crate::models::{Repository, ScanSource};
 
+type ScanProgressObserver = Arc<dyn Fn(usize, usize) + Send + Sync>;
+
 /// Repository scanner
 pub struct Scanner;
 
@@ -19,6 +21,7 @@ impl Scanner {
         db: &Database,
         progress: bool,
         jobs: usize,
+        progress_observer: Option<ScanProgressObserver>,
     ) -> Result<Vec<Repository>> {
         let root = Path::new(&source.root_path);
 
@@ -34,6 +37,9 @@ impl Scanner {
                 .await??;
         // 发现集合与 inspect 成功集合必须分离：仓库即使暂时无法打开，也仍然存在于磁盘。
         let discovered_paths = Self::repo_paths_from_git_dirs(&git_dirs);
+        if let Some(observer) = &progress_observer {
+            observer(0, git_dirs.len());
+        }
 
         let pb: Option<Arc<Mutex<ProgressBar>>> = if progress {
             let bar = ProgressBar::new(git_dirs.len() as u64);
@@ -53,6 +59,7 @@ impl Scanner {
         // - Uses blocking wait (no busy-wait)
         // - Reasonable timeout (5 seconds)
         let max_concurrent = jobs.clamp(1, 100);
+        let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         // Build task list
         let tasks: Vec<_> = git_dirs
@@ -61,6 +68,9 @@ impl Scanner {
                 let repo_path = git_dir.parent().unwrap_or(&git_dir).to_path_buf();
                 let root_path = source.root_path.clone();
                 let pb = pb.clone();
+                let completed = Arc::clone(&completed);
+                let progress_observer = progress_observer.clone();
+                let total = discovered_paths.len();
 
                 move || {
                     let repo_name = repo_path
@@ -80,6 +90,10 @@ impl Scanner {
                         && let Ok(bar) = bar.lock()
                     {
                         bar.inc(1);
+                    }
+                    let current = completed.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+                    if let Some(observer) = progress_observer {
+                        observer(current, total);
                     }
 
                     result.map_err(|e| e.to_string())
@@ -296,7 +310,7 @@ impl Scanner {
                 println!("\n📁 扫描: {}", source.root_path);
             }
 
-            match Self::scan_source(source, db, progress, jobs).await {
+            match Self::scan_source(source, db, progress, jobs, None).await {
                 Ok(mut repos) => {
                     all_repos.append(&mut repos);
                 }

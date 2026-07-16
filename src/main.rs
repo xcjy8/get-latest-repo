@@ -208,7 +208,12 @@ async fn main() -> Result<std::process::ExitCode> {
     let proxy_config = build_proxy_config(cli.proxy, cli.proxy_url);
 
     let exit_code = match cli.command {
-        Commands::Serve { port, no_open } => web::serve(
+        Commands::Serve {
+            bind,
+            port,
+            no_open,
+        } => web::serve(
+            bind,
             port,
             !no_open,
             proxy_config.unwrap_or_default(),

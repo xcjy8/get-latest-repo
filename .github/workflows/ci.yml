@@ -35,3 +35,20 @@ jobs:
 
       - name: Run clippy
         run: cargo clippy -- -D warnings
+
+  docker-volume-lifecycle:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        lane:
+          - ordinary
+          - persistence
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build backend image
+        run: docker build --target backend --tag pro-get-latest-repo-backend:latest .
+
+      - name: Verify Docker volume lifecycle lane
+        run: ./scripts/verify-docker-volumes-${{ matrix.lane }}.sh

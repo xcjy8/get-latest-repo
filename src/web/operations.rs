@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -454,6 +454,31 @@ fn repository_progress_observer(
     })
 }
 
+/// 阶段切换时使用独立计数，让安全扫描等准备工作不再长期停留在 0。
+fn phase_progress_observer(
+    state: WebState,
+) -> Arc<dyn Fn(&'static str, usize, usize) + Send + Sync> {
+    let last_emit = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(1)));
+    Arc::new(move |phase: &'static str, completed: usize, total: usize| {
+        let should_emit = last_emit.lock().is_ok_and(|mut last_emit| {
+            if completed != total && last_emit.elapsed() < Duration::from_millis(50) {
+                return false;
+            }
+            *last_emit = Instant::now();
+            true
+        });
+        if should_emit
+            && let Ok(operation) = state.operations.update(|operation| {
+                operation.completed = completed;
+                operation.total = total;
+                operation.message = format!("{phase}：{completed}/{total}");
+            })
+        {
+            state.events.publish("operation.patch", &operation);
+        }
+    })
+}
+
 async fn run_operation(state: &WebState, queued: &OperationDto) -> Result<ExecutionOutcome> {
     let kind = queued.kind;
     if state.operations.cancellation_requested() {
@@ -463,6 +488,7 @@ async fn run_operation(state: &WebState, queued: &OperationDto) -> Result<Execut
     if !config.is_initialized() {
         anyhow::bail!("尚未初始化扫描源");
     }
+    let concurrency = crate::concurrent::AdaptiveConcurrency::detect(config.default_jobs);
     let db = Database::open()?;
 
     match kind {
@@ -483,13 +509,20 @@ async fn run_operation(state: &WebState, queued: &OperationDto) -> Result<Execut
                 }) {
                     state.events.publish("operation.patch", &operation);
                 }
-                Scanner::scan_source(source, &db, false, config.default_jobs).await?;
+                Scanner::scan_source(
+                    source,
+                    &db,
+                    false,
+                    concurrency.io_jobs,
+                    Some(repository_progress_observer(state.clone(), "正在扫描仓库")),
+                )
+                .await?;
             }
         }
         OperationKind::Fetch => {
             let repositories = db.list_repositories()?;
             let cancellation_state = state.operations.clone();
-            let summary = Fetcher::new(config.default_jobs, config.default_timeout)
+            let summary = Fetcher::new(concurrency.fetch_jobs, config.default_timeout)
                 .with_security_scan(state.security_check)
                 .with_auto_allow_high_risk(true)
                 .with_proxy(state.proxy.clone())
@@ -508,9 +541,11 @@ async fn run_operation(state: &WebState, queued: &OperationDto) -> Result<Execut
                 .filter(|result| result.success)
                 .map(|result| result.repo_path.clone())
                 .collect::<Vec<_>>();
+            let reconcile_progress =
+                repository_progress_observer(state.clone(), "正在复检获取结果");
             let (reconciled_paths, reconcile_errors) = tokio::task::spawn_blocking({
-                let jobs = config.default_jobs;
-                move || reconcile_fetch_successes(fetched_paths, jobs)
+                let jobs = concurrency.io_jobs;
+                move || reconcile_fetch_successes(fetched_paths, jobs, reconcile_progress)
             })
             .await??;
             for result in &summary.results {
@@ -658,7 +693,7 @@ async fn run_operation(state: &WebState, queued: &OperationDto) -> Result<Execut
             let cancellation_state = state.operations.clone();
             let mut executor = WorkflowExecutor::new(
                 workflow,
-                Some(config.default_jobs),
+                Some(concurrency.fetch_jobs),
                 Some(config.default_timeout),
                 false,
                 true,
@@ -667,6 +702,9 @@ async fn run_operation(state: &WebState, queued: &OperationDto) -> Result<Execut
             .with_auto_allow_high_risk(true)
             .with_proxy(state.proxy.clone())
             .with_progress_observer(repository_progress_observer(state.clone(), "正在更新仓库"))
+            .with_phase_progress_observer(phase_progress_observer(state.clone()))
+            // Web 结束时会并发执行一次权威复检；跳过执行器内部串行重复扫描。
+            .with_deferred_status_refresh(true)
             .with_cancellation_checker(Arc::new(move || {
                 cancellation_state.cancellation_requested()
             }));
@@ -700,6 +738,7 @@ async fn run_operation(state: &WebState, queued: &OperationDto) -> Result<Execut
                         targets,
                         repository_issues,
                         batch_errors,
+                        concurrency.io_jobs,
                         reconcile_progress,
                     )
                 })
@@ -732,10 +771,13 @@ async fn run_operation(state: &WebState, queued: &OperationDto) -> Result<Execut
 fn reconcile_fetch_successes(
     paths: Vec<String>,
     jobs: usize,
+    progress_observer: Arc<dyn Fn(usize, usize) + Send + Sync>,
 ) -> Result<(
     std::collections::HashSet<String>,
     std::collections::HashMap<String, String>,
 )> {
+    let total = paths.len();
+    progress_observer(0, total);
     let database = Database::open()?;
     let mut candidates = Vec::new();
     let mut errors = std::collections::HashMap::new();
@@ -747,20 +789,15 @@ fn reconcile_fetch_successes(
             }
         }
     }
-    let task_repositories = candidates.clone();
-    let tasks = candidates
-        .into_iter()
-        .map(|repository| {
-            move || {
-                let result = crate::git::GitOps::inspect(
-                    std::path::Path::new(&repository.path),
-                    &repository.root_path,
-                );
-                (repository, result)
-            }
-        })
-        .collect();
-    let results = crate::concurrent::execute_concurrent_raw(tasks, jobs);
+    let initial_completed = errors.len();
+    progress_observer(initial_completed, total);
+    let (task_repositories, results) = inspect_fetch_candidates(
+        candidates,
+        jobs,
+        initial_completed,
+        total,
+        progress_observer,
+    );
     let mut succeeded = std::collections::HashSet::new();
     for (repository, result) in task_repositories.into_iter().zip(results) {
         match result {
@@ -782,12 +819,43 @@ fn reconcile_fetch_successes(
     Ok((succeeded, errors))
 }
 
+type FetchInspectResult = Option<(Repository, crate::error::Result<Repository>)>;
+type FetchInspectBatch = (Vec<Repository>, Vec<FetchInspectResult>);
+
+/// 并发复检成功获取的仓库，并在每个实际完成点上报阶段进度。
+fn inspect_fetch_candidates(
+    candidates: Vec<Repository>,
+    jobs: usize,
+    initial_completed: usize,
+    total: usize,
+    progress_observer: Arc<dyn Fn(usize, usize) + Send + Sync>,
+) -> FetchInspectBatch {
+    let task_repositories = candidates.clone();
+    let completed = Arc::new(AtomicUsize::new(initial_completed));
+    let tasks = candidates
+        .into_iter()
+        .map(|repository| {
+            let completed = Arc::clone(&completed);
+            let progress_observer = Arc::clone(&progress_observer);
+            move || {
+                let result = crate::git::GitOps::refresh_remote_state_after_fetch(&repository);
+                let current = completed.fetch_add(1, Ordering::AcqRel) + 1;
+                progress_observer(current, total);
+                (repository, result)
+            }
+        })
+        .collect();
+    let results = crate::concurrent::execute_concurrent_raw(tasks, jobs);
+    (task_repositories, results)
+}
+
 /// 更新后逐仓库复检；最终 Git 状态是统计权威，执行过程错误只决定“部分成功/失败”。
 fn reconcile_pull_batch(
     batch_id: &str,
     targets: Vec<Repository>,
     repository_issues: Vec<RepositoryExecutionIssue>,
     batch_errors: Vec<String>,
+    jobs: usize,
     progress_observer: Arc<dyn Fn(usize, usize) + Send + Sync>,
 ) -> Result<(OperationCountersDto, Vec<String>)> {
     let database = Database::open()?;
@@ -795,16 +863,74 @@ fn reconcile_pull_batch(
     let mut details = Vec::new();
 
     let total = targets.len();
-    for (index, target) in targets.into_iter().enumerate() {
-        let repository_errors = issue_messages_for_path(&repository_issues, &target.path);
-        let inspected =
-            crate::git::GitOps::inspect(std::path::Path::new(&target.path), &target.root_path);
+    let (action_targets, no_action_targets): (Vec<_>, Vec<_>) =
+        targets.into_iter().partition(repository_requires_action);
+    counters.no_action = no_action_targets.len();
+    for target in no_action_targets {
+        database.upsert_operation_item(&OperationItemRecord {
+            batch_id: batch_id.to_string(),
+            repo_id: target.id,
+            repo_path: target.path,
+            repo_name: target.name,
+            stage: "reconcile".to_string(),
+            outcome: "no_action".to_string(),
+            error_code: None,
+            error_detail: None,
+            parent_synced: true,
+            final_dirty: false,
+        })?;
+    }
+
+    progress_observer(counters.no_action, total);
+    let task_targets = action_targets.clone();
+    let completed = Arc::new(std::sync::atomic::AtomicUsize::new(counters.no_action));
+    let tasks = action_targets
+        .into_iter()
+        .map(|target| {
+            let repository_errors = issue_messages_for_path(&repository_issues, &target.path);
+            let completed = Arc::clone(&completed);
+            let progress_observer = Arc::clone(&progress_observer);
+            move || {
+                let inspected = crate::git::GitOps::inspect(
+                    std::path::Path::new(&target.path),
+                    &target.root_path,
+                );
+                let current = completed.fetch_add(1, Ordering::AcqRel) + 1;
+                progress_observer(current, total);
+                (repository_errors, inspected)
+            }
+        })
+        .collect();
+    let results = crate::concurrent::execute_concurrent_raw(tasks, jobs);
+
+    for (target, result) in task_targets.into_iter().zip(results) {
+        let (repository_errors, inspected) = match result {
+            Some(result) => result,
+            None => {
+                counters.failed += 1;
+                let detail = format!("{}：更新后状态复检任务异常退出", target.name);
+                details.push(detail.clone());
+                database.upsert_operation_item(&OperationItemRecord {
+                    batch_id: batch_id.to_string(),
+                    repo_id: target.id,
+                    repo_path: target.path,
+                    repo_name: target.name,
+                    stage: "reconcile".to_string(),
+                    outcome: "failed".to_string(),
+                    error_code: Some("reconcile_task_failed".to_string()),
+                    error_detail: Some(detail),
+                    parent_synced: false,
+                    final_dirty: target.dirty,
+                })?;
+                continue;
+            }
+        };
         let (outcome, error_detail, parent_synced, final_dirty) = match inspected {
             Ok(mut fresh) => {
                 fresh.id = target.id;
                 fresh.last_fetch_at = target.last_fetch_at;
                 let parent_synced = fresh.freshness != Freshness::HasUpdates;
-                let required_action = target.freshness == Freshness::HasUpdates || target.dirty;
+                let required_action = repository_requires_action(&target);
                 if parent_synced && target.freshness == Freshness::HasUpdates {
                     fresh.last_pull_at = Some(chrono::Local::now());
                 } else {
@@ -854,10 +980,13 @@ fn reconcile_pull_batch(
             parent_synced,
             final_dirty,
         })?;
-        progress_observer(index + 1, total);
     }
     details.extend(batch_errors);
     Ok((counters, details))
+}
+
+fn repository_requires_action(repository: &Repository) -> bool {
+    repository.freshness == Freshness::HasUpdates || repository.dirty
 }
 
 fn issue_messages_for_path(
@@ -951,5 +1080,44 @@ mod tests {
             issue_messages_for_path(&issues, "/repos/second"),
             vec!["same-name：第二个失败"]
         );
+    }
+
+    #[test]
+    fn final_reconcile_skips_repositories_that_required_no_action() {
+        assert!(!repository_requires_action(&repository(
+            Freshness::Synced,
+            None
+        )));
+
+        let mut dirty = repository(Freshness::Synced, None);
+        dirty.dirty = true;
+        assert!(repository_requires_action(&dirty));
+        assert!(repository_requires_action(&repository(
+            Freshness::HasUpdates,
+            None
+        )));
+    }
+
+    #[test]
+    fn fetch_reconcile_reports_progress_for_each_completed_repository() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_by_callback = Arc::clone(&observed);
+        let progress: Arc<dyn Fn(usize, usize) + Send + Sync> =
+            Arc::new(move |completed, total| {
+                observed_by_callback
+                    .lock()
+                    .unwrap()
+                    .push((completed, total));
+            });
+        let candidate = Repository {
+            path: "/definitely-missing/repository".to_string(),
+            root_path: "/definitely-missing".to_string(),
+            ..Repository::default()
+        };
+
+        let (_, results) = inspect_fetch_candidates(vec![candidate], 1, 0, 1, progress);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(observed.lock().unwrap().last(), Some(&(1, 1)));
     }
 }

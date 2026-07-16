@@ -1,5 +1,6 @@
 use anyhow::Result;
 use colored::*;
+use futures::StreamExt;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -15,6 +16,9 @@ use crate::scanner::Scanner;
 use crate::security::{SecurityScanner, format_security_report};
 
 use super::types::*;
+
+type RepositoryProgressObserver = Arc<dyn Fn(usize, usize) + Send + Sync>;
+type PhaseProgressObserver = Arc<dyn Fn(&'static str, usize, usize) + Send + Sync>;
 
 /// 交互式安全确认的批量选择结果。
 ///
@@ -300,7 +304,9 @@ pub struct WorkflowExecutor {
     proxy: ProxyConfig,
     target_scope: Option<RepositoryScope>,
     cancellation_checker: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
-    progress_observer: Option<Arc<dyn Fn(usize, usize) + Send + Sync>>,
+    progress_observer: Option<RepositoryProgressObserver>,
+    phase_progress_observer: Option<PhaseProgressObserver>,
+    defer_status_refresh: bool,
 }
 
 impl WorkflowExecutor {
@@ -325,6 +331,8 @@ impl WorkflowExecutor {
             target_scope: None,
             cancellation_checker: None,
             progress_observer: None,
+            phase_progress_observer: None,
+            defer_status_refresh: false,
         }
     }
 
@@ -388,11 +396,20 @@ impl WorkflowExecutor {
     }
 
     /// 注册仓库级进度观察器；主要用于实时控制台展示工作流中的 fetch 阶段。
-    pub fn with_progress_observer(
-        mut self,
-        observer: Arc<dyn Fn(usize, usize) + Send + Sync>,
-    ) -> Self {
+    pub fn with_progress_observer(mut self, observer: RepositoryProgressObserver) -> Self {
         self.progress_observer = Some(observer);
+        self
+    }
+
+    /// 注册阶段级进度观察器；安全扫描等准备阶段可独立展示真实进度。
+    pub fn with_phase_progress_observer(mut self, observer: PhaseProgressObserver) -> Self {
+        self.phase_progress_observer = Some(observer);
+        self
+    }
+
+    /// 延后逐仓库状态刷新；调用方必须在工作流结束后执行一次权威批量复检。
+    pub fn with_deferred_status_refresh(mut self, defer: bool) -> Self {
+        self.defer_status_refresh = defer;
         self
     }
 
@@ -1277,30 +1294,43 @@ impl WorkflowExecutor {
             return Ok(Vec::new());
         }
 
+        let total = stored_repos.len();
+        if let Some(observer) = &self.phase_progress_observer {
+            observer("正在复检目标仓库", 0, total);
+        }
+        let completed = Arc::new(AtomicUsize::new(0));
+        let progress_observer = self.phase_progress_observer.clone();
         let tasks: Vec<_> = stored_repos
             .into_iter()
             .map(|stored| {
+                let completed = Arc::clone(&completed);
+                let progress_observer = progress_observer.clone();
                 move || {
                     let path = std::path::PathBuf::from(&stored.path);
-                    if !path.exists() {
-                        return ScopedScanOutcome::Stale {
+                    let outcome = if !path.exists() {
+                        ScopedScanOutcome::Stale {
                             repo: stored,
                             reason: "路径不存在，保留数据库中的最后快照".to_string(),
-                        };
-                    }
-
-                    match crate::git::GitOps::inspect(&path, &stored.root_path) {
-                        Ok(mut refreshed) => {
-                            refreshed.id = stored.id;
-                            refreshed.last_fetch_at = stored.last_fetch_at;
-                            refreshed.last_pull_at = stored.last_pull_at;
-                            ScopedScanOutcome::Fresh(refreshed)
                         }
-                        Err(e) => ScopedScanOutcome::Stale {
-                            repo: stored,
-                            reason: format!("重新检查失败：{e}"),
-                        },
+                    } else {
+                        match crate::git::GitOps::inspect(&path, &stored.root_path) {
+                            Ok(mut refreshed) => {
+                                refreshed.id = stored.id;
+                                refreshed.last_fetch_at = stored.last_fetch_at;
+                                refreshed.last_pull_at = stored.last_pull_at;
+                                ScopedScanOutcome::Fresh(refreshed)
+                            }
+                            Err(e) => ScopedScanOutcome::Stale {
+                                repo: stored,
+                                reason: format!("重新检查失败：{e}"),
+                            },
+                        }
+                    };
+                    let current = completed.fetch_add(1, Ordering::AcqRel) + 1;
+                    if let Some(observer) = progress_observer {
+                        observer("正在复检目标仓库", current, total);
                     }
+                    outcome
                 }
             })
             .collect();
@@ -1404,6 +1434,7 @@ impl WorkflowExecutor {
     async fn filter_repos_by_pull_security(
         &self,
         repos: Vec<crate::models::Repository>,
+        jobs: usize,
     ) -> Result<(Vec<crate::models::Repository>, Vec<String>)> {
         use std::io::{IsTerminal, Write};
 
@@ -1419,24 +1450,56 @@ impl WorkflowExecutor {
             println!("  ├─ {} 正在执行 Pull 前安全扫描...", "🛡️".blue());
         }
 
-        for repo in repos {
-            if self.is_cancelled() {
-                anyhow::bail!("用户中断，停止安全扫描");
-            }
+        let total = repos.len();
+        if let Some(observer) = &self.phase_progress_observer {
+            observer("正在执行安全扫描", 0, total);
+        }
+        let completed = Arc::new(AtomicUsize::new(0));
+        let cancellation_checker = self.cancellation_checker.clone();
+        let progress_observer = self.phase_progress_observer.clone();
+        let concurrency = jobs.clamp(1, total);
+        let mut scan_results = futures::stream::iter(repos.into_iter().enumerate())
+            .map(|(index, repo)| {
+                let completed = Arc::clone(&completed);
+                let cancellation_checker = cancellation_checker.clone();
+                let progress_observer = progress_observer.clone();
+                async move {
+                    let cancelled = crate::signal_handler::is_shutdown_requested()
+                        || cancellation_checker
+                            .as_ref()
+                            .is_some_and(|checker| checker());
+                    let scan_result = if cancelled {
+                        Err(anyhow::anyhow!("用户中断，停止安全扫描"))
+                    } else {
+                        let path = std::path::PathBuf::from(&repo.path);
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(30),
+                            tokio::task::spawn_blocking(move || Self::scan_repo_before_pull(&path)),
+                        )
+                        .await
+                        {
+                            Ok(Ok(Ok(result))) => Ok(result),
+                            Ok(Ok(Err(e))) => Err(e),
+                            Ok(Err(_)) => Err(anyhow::anyhow!("安全扫描任务 panic")),
+                            Err(_) => Err(anyhow::anyhow!("安全扫描超时（30 秒）")),
+                        }
+                    };
+                    let current = completed.fetch_add(1, Ordering::AcqRel) + 1;
+                    if let Some(observer) = progress_observer {
+                        observer("正在执行安全扫描", current, total);
+                    }
+                    (index, repo, scan_result)
+                }
+            })
+            .buffer_unordered(concurrency)
+            .collect::<Vec<_>>()
+            .await;
+        scan_results.sort_unstable_by_key(|(index, _, _)| *index);
+        if self.is_cancelled() {
+            anyhow::bail!("用户中断，停止安全扫描");
+        }
 
-            let path = std::path::PathBuf::from(&repo.path);
-            let scan_result = match tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                tokio::task::spawn_blocking(move || Self::scan_repo_before_pull(&path)),
-            )
-            .await
-            {
-                Ok(Ok(Ok(result))) => Ok(result),
-                Ok(Ok(Err(e))) => Err(e),
-                Ok(Err(_)) => Err(anyhow::anyhow!("安全扫描任务 panic")),
-                Err(_) => Err(anyhow::anyhow!("安全扫描超时（30 秒）")),
-            };
-
+        for (_, repo, scan_result) in scan_results {
             match scan_result {
                 Ok((true, report)) => {
                     if !self.silent && !report.is_empty() && report.contains("安全警告") {
@@ -1767,7 +1830,9 @@ impl WorkflowExecutor {
 
         let mut security_skipped_repos = Vec::new();
         if !self.dry_run {
-            let (filtered, skipped) = self.filter_repos_by_pull_security(clean_repos).await?;
+            let (filtered, skipped) = self
+                .filter_repos_by_pull_security(clean_repos, jobs)
+                .await?;
             clean_repos = filtered;
             security_skipped_repos = skipped;
 
@@ -2056,7 +2121,9 @@ impl WorkflowExecutor {
 
                     // Refresh the repository status and collect latest commit time
                     let mut latest_time = None;
-                    if let Ok(Some(old_repo)) = db.get_repository(&path) {
+                    if !self.defer_status_refresh
+                        && let Ok(Some(old_repo)) = db.get_repository(&path)
+                    {
                         let path_buf = std::path::PathBuf::from(&path);
                         let root_path = old_repo.root_path.clone();
                         if let Ok(Ok(Ok(mut fresh))) = tokio::time::timeout(
@@ -2204,7 +2271,7 @@ impl WorkflowExecutor {
                 .cloned()
                 .collect();
             let (filtered_repos, _security_skipped) = self
-                .filter_repos_by_pull_security(security_candidates)
+                .filter_repos_by_pull_security(security_candidates, jobs)
                 .await?;
             let allowed_paths: std::collections::HashSet<String> =
                 filtered_repos.into_iter().map(|repo| repo.path).collect();
@@ -2297,7 +2364,9 @@ impl WorkflowExecutor {
                     }
 
                     let mut latest_time = None;
-                    if let Ok(Some(old_repo)) = db.get_repository(&path) {
+                    if !self.defer_status_refresh
+                        && let Ok(Some(old_repo)) = db.get_repository(&path)
+                    {
                         let path_buf = std::path::PathBuf::from(&path);
                         let root_path = old_repo.root_path.clone();
                         if let Ok(Ok(Ok(mut fresh))) = tokio::time::timeout(
@@ -2386,24 +2455,26 @@ impl WorkflowExecutor {
             }
         }
 
-        // Refresh conflict repos status
-        for conflict in &pull_result.conflict_repos {
-            if let Ok(Some(old_repo)) = db.get_repository(&conflict.path) {
-                let path_buf = std::path::PathBuf::from(&conflict.path);
-                let root_path = old_repo.root_path.clone();
-                if let Ok(Ok(Ok(mut fresh))) = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    tokio::task::spawn_blocking(move || {
-                        crate::git::GitOps::inspect(&path_buf, &root_path)
-                    }),
-                )
-                .await
-                {
-                    fresh.id = old_repo.id;
-                    fresh.last_fetch_at = old_repo.last_fetch_at;
-                    fresh.last_pull_at = Some(chrono::Local::now());
-                    if let Err(e) = db.upsert_repository(&mut fresh) {
-                        eprintln!("   警告：更新冲突仓库状态失败: {}", e);
+        if !self.defer_status_refresh {
+            // CLI 没有后续权威复检，因此需在工作流内刷新冲突仓库。
+            for conflict in &pull_result.conflict_repos {
+                if let Ok(Some(old_repo)) = db.get_repository(&conflict.path) {
+                    let path_buf = std::path::PathBuf::from(&conflict.path);
+                    let root_path = old_repo.root_path.clone();
+                    if let Ok(Ok(Ok(mut fresh))) = tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        tokio::task::spawn_blocking(move || {
+                            crate::git::GitOps::inspect(&path_buf, &root_path)
+                        }),
+                    )
+                    .await
+                    {
+                        fresh.id = old_repo.id;
+                        fresh.last_fetch_at = old_repo.last_fetch_at;
+                        fresh.last_pull_at = Some(chrono::Local::now());
+                        if let Err(e) = db.upsert_repository(&mut fresh) {
+                            eprintln!("   警告：更新冲突仓库状态失败: {}", e);
+                        }
                     }
                 }
             }
@@ -2485,8 +2556,9 @@ impl WorkflowExecutor {
             return Ok(PullForceResult::new());
         }
 
-        let (filtered_repos, _security_skipped) =
-            self.filter_repos_by_pull_security(behind_repos).await?;
+        let (filtered_repos, _security_skipped) = self
+            .filter_repos_by_pull_security(behind_repos, jobs)
+            .await?;
         behind_repos = filtered_repos;
 
         if behind_repos.is_empty() {
@@ -2581,27 +2653,26 @@ impl WorkflowExecutor {
             }
         }
 
-        // Refresh the status of succeeded repositories
-        for (_name, path) in &success_paths {
-            if let Ok(Some(old_repo)) = db.get_repository(path) {
-                let path_buf = std::path::PathBuf::from(path);
-                let root_path = old_repo.root_path.clone();
-                if let Ok(Ok(Ok(mut fresh))) = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    tokio::task::spawn_blocking(move || {
-                        crate::git::GitOps::inspect(&path_buf, &root_path)
-                    }),
-                )
-                .await
-                {
-                    fresh.id = old_repo.id;
-                    fresh.last_fetch_at = old_repo.last_fetch_at;
-                    fresh.last_pull_at = Some(chrono::Local::now());
-                    if let Err(e) = db.upsert_repository(&mut fresh) {
-                        eprintln!("   警告：Pull 后更新仓库失败: {}", e);
-                    } else {
-                        // Only update pull time after upsert succeeds
-                        if let Err(e) = db.update_pull_time(path) {
+        if !self.defer_status_refresh {
+            // CLI 没有后续权威复检，因此需在工作流内刷新成功与冲突仓库。
+            for (_name, path) in &success_paths {
+                if let Ok(Some(old_repo)) = db.get_repository(path) {
+                    let path_buf = std::path::PathBuf::from(path);
+                    let root_path = old_repo.root_path.clone();
+                    if let Ok(Ok(Ok(mut fresh))) = tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        tokio::task::spawn_blocking(move || {
+                            crate::git::GitOps::inspect(&path_buf, &root_path)
+                        }),
+                    )
+                    .await
+                    {
+                        fresh.id = old_repo.id;
+                        fresh.last_fetch_at = old_repo.last_fetch_at;
+                        fresh.last_pull_at = Some(chrono::Local::now());
+                        if let Err(e) = db.upsert_repository(&mut fresh) {
+                            eprintln!("   警告：Pull 后更新仓库失败: {}", e);
+                        } else if let Err(e) = db.update_pull_time(path) {
                             eprintln!(
                                 "   ⚠️ 更新 pull 时间失败 '{}': {}",
                                 crate::utils::sanitize_path(path),
@@ -2611,26 +2682,25 @@ impl WorkflowExecutor {
                     }
                 }
             }
-        }
 
-        // Refresh the status of conflict repositories so dirty state is visible in subsequent scans
-        for conflict in &pull_result.conflict_repos {
-            if let Ok(Some(old_repo)) = db.get_repository(&conflict.path) {
-                let path_buf = std::path::PathBuf::from(&conflict.path);
-                let root_path = old_repo.root_path.clone();
-                if let Ok(Ok(Ok(mut fresh))) = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    tokio::task::spawn_blocking(move || {
-                        crate::git::GitOps::inspect(&path_buf, &root_path)
-                    }),
-                )
-                .await
-                {
-                    fresh.id = old_repo.id;
-                    fresh.last_fetch_at = old_repo.last_fetch_at;
-                    fresh.last_pull_at = Some(chrono::Local::now());
-                    if let Err(e) = db.upsert_repository(&mut fresh) {
-                        eprintln!("   警告：更新冲突仓库状态失败: {}", e);
+            for conflict in &pull_result.conflict_repos {
+                if let Ok(Some(old_repo)) = db.get_repository(&conflict.path) {
+                    let path_buf = std::path::PathBuf::from(&conflict.path);
+                    let root_path = old_repo.root_path.clone();
+                    if let Ok(Ok(Ok(mut fresh))) = tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        tokio::task::spawn_blocking(move || {
+                            crate::git::GitOps::inspect(&path_buf, &root_path)
+                        }),
+                    )
+                    .await
+                    {
+                        fresh.id = old_repo.id;
+                        fresh.last_fetch_at = old_repo.last_fetch_at;
+                        fresh.last_pull_at = Some(chrono::Local::now());
+                        if let Err(e) = db.upsert_repository(&mut fresh) {
+                            eprintln!("   警告：更新冲突仓库状态失败: {}", e);
+                        }
                     }
                 }
             }

@@ -1,6 +1,8 @@
 use anyhow::Context;
 use colored::Colorize;
 use git2::{BranchType, Repository as GitRepository, StatusOptions};
+use sha2::{Digest, Sha256};
+use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -74,6 +76,9 @@ pub struct GitOps {
 }
 
 impl GitOps {
+    const AUTOMATION_USER_NAME: &'static str = "GetLatestRepo";
+    const AUTOMATION_USER_EMAIL: &'static str = "getlatestrepo@localhost";
+
     /// Create instance with proxy
     pub fn with_proxy(proxy: ProxyConfig) -> Self {
         Self { proxy }
@@ -148,6 +153,32 @@ impl GitOps {
             last_fetch_at: None,
             last_pull_at: None,
         })
+    }
+
+    /// Fetch 只更新远程跟踪引用，不会修改分支 HEAD 或工作区文件。
+    ///
+    /// 因此 Fetch 后只重算 upstream 与 ahead/behind；复用已有 dirty、提交信息，
+    /// 避免再次遍历整个工作区。若检测到分支被外部进程切换，则回退完整检查，
+    /// 保证并发人工操作下的数据正确性。
+    pub fn refresh_remote_state_after_fetch(cached: &Repository) -> Result<Repository> {
+        let path = Path::new(&cached.path);
+        let repo = Self::open(path)?;
+        let branch = Self::get_current_branch(&repo)?;
+        if branch != cached.branch {
+            return Self::inspect(path, &cached.root_path);
+        }
+
+        let (upstream_ref, upstream_url) = Self::get_upstream_info(&repo)?;
+        let upstream_url = upstream_url.map(|url| crate::utils::sanitize_url(&url));
+        let (ahead_count, behind_count, freshness) = Self::calculate_sync_status(&repo)?;
+        let mut refreshed = cached.clone();
+        refreshed.upstream_ref = upstream_ref;
+        refreshed.upstream_url = upstream_url;
+        refreshed.ahead_count = ahead_count;
+        refreshed.behind_count = behind_count;
+        refreshed.freshness = freshness;
+        refreshed.last_scanned_at = Some(chrono::Local::now());
+        Ok(refreshed)
     }
 
     /// Get current branch name
@@ -289,6 +320,18 @@ impl GitOps {
         for entry in statuses.iter() {
             if let Ok(path) = entry.path() {
                 let status = entry.status();
+                // Finder 浏览目录时会自动写入未跟踪的 `.DS_Store`。它既不代表用户
+                // 修改了仓库内容，也会让大量只读镜像仓库被误标为“本地修改”。
+                // 仅忽略纯未跟踪状态；已纳入版本控制的 `.DS_Store` 发生变化仍需报告。
+                if Self::is_untracked_finder_metadata(repo, path, status) {
+                    continue;
+                }
+                // libgit2 不执行 Git LFS 的 clean filter，会把已经正确水合的大文件
+                // 与索引中的 LFS 指针误判为修改。按指针记录的 SHA-256 与大小核验；
+                // 只有内容完全一致才忽略，真实改动仍然报告。
+                if Self::is_clean_hydrated_lfs_file(repo, path, status) {
+                    continue;
+                }
 
                 // Determine change type
                 let status_str = if status.contains(git2::Status::WT_NEW)
@@ -335,6 +378,132 @@ impl GitOps {
 
         let is_dirty = !file_changes.is_empty();
         Ok((is_dirty, file_changes))
+    }
+
+    fn is_untracked_finder_metadata(
+        repo: &GitRepository,
+        path: &str,
+        status: git2::Status,
+    ) -> bool {
+        if status != git2::Status::WT_NEW {
+            return false;
+        }
+        let relative_path = Path::new(path);
+        if relative_path
+            .file_name()
+            .is_some_and(|name| name == ".DS_Store")
+        {
+            return true;
+        }
+        let Some(workdir) = repo.workdir() else {
+            return false;
+        };
+        let directory = workdir.join(relative_path);
+        if !directory.is_dir() {
+            return false;
+        }
+
+        // libgit2 默认把未跟踪目录折叠成 `目录/`。仅在小目录内逐项确认，
+        // 防止 `migration/.DS_Store` 这类 Finder 噪声被误判，同时避免遍历大型产物目录。
+        let mut files = 0_usize;
+        for entry in walkdir::WalkDir::new(directory).follow_links(false) {
+            let Ok(entry) = entry else {
+                return false;
+            };
+            if entry.file_type().is_symlink() {
+                return false;
+            }
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            files += 1;
+            if files > 128 || entry.file_name() != ".DS_Store" {
+                return false;
+            }
+        }
+        files > 0
+    }
+
+    fn is_clean_hydrated_lfs_file(repo: &GitRepository, path: &str, status: git2::Status) -> bool {
+        if status != git2::Status::WT_MODIFIED {
+            return false;
+        }
+        let Some(workdir) = repo.workdir() else {
+            return false;
+        };
+        let Ok(index) = repo.index() else {
+            return false;
+        };
+        let Some(entry) = index.get_path(Path::new(path), 0) else {
+            return false;
+        };
+        let Ok(blob) = repo.find_blob(entry.id) else {
+            return false;
+        };
+        let Some((expected_oid, expected_size)) = Self::parse_lfs_pointer(blob.content()) else {
+            return false;
+        };
+        let file_path = workdir.join(path);
+        let Ok(metadata) = file_path.metadata() else {
+            return false;
+        };
+        if !metadata.is_file() || metadata.len() != expected_size {
+            return false;
+        }
+        let Ok(mut file) = std::fs::File::open(file_path) else {
+            return false;
+        };
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let Ok(read) = file.read(&mut buffer) else {
+                return false;
+            };
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        Self::hex_bytes(hasher.finalize().as_ref()) == expected_oid
+    }
+
+    fn parse_lfs_pointer(content: &[u8]) -> Option<(String, u64)> {
+        if content.len() > 1024 {
+            return None;
+        }
+        let text = std::str::from_utf8(content).ok()?;
+        let mut lines = text.lines();
+        if lines.next()? != "version https://git-lfs.github.com/spec/v1" {
+            return None;
+        }
+        let oid = lines.next()?.strip_prefix("oid sha256:")?;
+        if oid.len() != 64 || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        let size = lines.next()?.strip_prefix("size ")?.parse().ok()?;
+        Some((oid.to_ascii_lowercase(), size))
+    }
+
+    fn hex_bytes(bytes: &[u8]) -> String {
+        use std::fmt::Write;
+
+        let mut output = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            write!(&mut output, "{byte:02x}").expect("写入 String 不会失败");
+        }
+        output
+    }
+
+    /// Stash 需要作者签名，但容器化只读镜像通常不会配置全局 Git 身份。
+    ///
+    /// 优先使用用户已有身份；缺失或无效时仅为当前 stash 生成临时自动化签名，
+    /// 不写入仓库配置，也不污染宿主机全局配置。
+    fn stash_signature(repo: &GitRepository) -> Result<git2::Signature<'static>> {
+        match repo.signature() {
+            Ok(signature) => Ok(signature),
+            Err(_) => git2::Signature::now(Self::AUTOMATION_USER_NAME, Self::AUTOMATION_USER_EMAIL)
+                .map_err(Into::into),
+        }
     }
 
     /// Get upstream info
@@ -474,6 +643,7 @@ impl GitOps {
         };
 
         let mut cmd = std::process::Command::new("git");
+        self.configure_fetch_proxy(&mut cmd, &remote_name);
         cmd.arg("-C")
             .arg(path)
             .args(["fetch", &remote_name])
@@ -482,13 +652,6 @@ impl GitOps {
             .env("GIT_HTTP_LOW_SPEED_LIMIT", "1000")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped());
-
-        // 使用环境变量传递代理，兼容旧版本 git（不支持 `git -c`）
-        if self.proxy.enabled {
-            cmd.env("HTTP_PROXY", &self.proxy.http_proxy)
-                .env("HTTPS_PROXY", &self.proxy.https_proxy)
-                .env("ALL_PROXY", &self.proxy.http_proxy);
-        }
 
         Self::configure_process_group(&mut cmd);
 
@@ -557,6 +720,28 @@ impl GitOps {
                     };
                 }
             }
+        }
+    }
+
+    /// 使用命令级配置覆盖仓库内遗留代理，确保容器统一走宿主机代理。
+    ///
+    /// `.git/config` 的 `http.proxy` 会覆盖普通环境变量；容器中的
+    /// `127.0.0.1` 又指向容器自身。因此同时覆盖通用代理与 remote 专用代理，
+    /// 并保留环境变量供 Git 的底层传输实现读取。
+    fn configure_fetch_proxy(&self, cmd: &mut std::process::Command, remote_name: &str) {
+        if self.proxy.enabled {
+            cmd.arg("-c")
+                .arg(format!("http.proxy={}", self.proxy.http_proxy))
+                .arg("-c")
+                .arg(format!("https.proxy={}", self.proxy.https_proxy))
+                .arg("-c")
+                .arg(format!(
+                    "remote.{remote_name}.proxy={}",
+                    self.proxy.https_proxy
+                ));
+            cmd.env("HTTP_PROXY", &self.proxy.http_proxy)
+                .env("HTTPS_PROXY", &self.proxy.https_proxy)
+                .env("ALL_PROXY", &self.proxy.http_proxy);
         }
     }
 
@@ -865,7 +1050,7 @@ impl GitOps {
         let (is_dirty, _) = Self::check_dirty(&repo)?;
         let stash_created = if is_dirty {
             // 1. Stash local changes
-            let sig = repo.signature()?;
+            let sig = Self::stash_signature(&repo)?;
             repo.stash_save(&sig, &stash_name, Some(git2::StashFlags::INCLUDE_UNTRACKED))?;
             true
         } else {
@@ -1142,7 +1327,7 @@ impl GitOps {
                 "getlatestrepo-backup-{}",
                 chrono::Local::now().format("%Y%m%d-%H%M%S")
             );
-            let sig = repo.signature()?;
+            let sig = Self::stash_signature(&repo)?;
             match repo.stash_save(&sig, &name, Some(git2::StashFlags::INCLUDE_UNTRACKED)) {
                 Ok(_) => Some(name),
                 Err(e) if Self::is_empty_stash_error(&e) => {
@@ -1406,6 +1591,9 @@ impl GitOps {
         command
             .arg("-C")
             .arg(path)
+            // 原生 Git 的子模块 stash 同样需要身份；`-c` 仅作用于本次子进程。
+            .args(["-c", &format!("user.name={}", Self::AUTOMATION_USER_NAME)])
+            .args(["-c", &format!("user.email={}", Self::AUTOMATION_USER_EMAIL)])
             .args(args)
             .env("GIT_TERMINAL_PROMPT", "0")
             .stdout(Stdio::piped())
@@ -2051,6 +2239,158 @@ mod tests {
         );
 
         String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn untracked_finder_metadata_does_not_mark_repository_dirty() {
+        let (_tmp, path, _) = create_repo_with_tracking();
+        std::fs::write(path.join(".DS_Store"), "finder metadata").unwrap();
+
+        let repo = git2::Repository::open(&path).unwrap();
+        let (dirty, changes) = GitOps::check_dirty(&repo).unwrap();
+
+        assert!(!dirty);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn directory_containing_only_finder_metadata_is_not_dirty() {
+        let (_tmp, path, _) = create_repo_with_tracking();
+        std::fs::create_dir(path.join("migration")).unwrap();
+        std::fs::write(path.join("migration/.DS_Store"), "finder metadata").unwrap();
+
+        let repo = git2::Repository::open(&path).unwrap();
+        let (dirty, changes) = GitOps::check_dirty(&repo).unwrap();
+
+        assert!(!dirty);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn untracked_directory_with_real_file_remains_dirty() {
+        let (_tmp, path, _) = create_repo_with_tracking();
+        std::fs::create_dir(path.join("migration")).unwrap();
+        std::fs::write(path.join("migration/.DS_Store"), "finder metadata").unwrap();
+        std::fs::write(path.join("migration/data.sql"), "real data").unwrap();
+
+        let repo = git2::Repository::open(&path).unwrap();
+        let (dirty, changes) = GitOps::check_dirty(&repo).unwrap();
+
+        assert!(dirty);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, "migration/");
+    }
+
+    #[test]
+    fn tracked_finder_metadata_changes_are_still_reported() {
+        let (_tmp, path, _) = create_repo_with_tracking();
+        std::fs::write(path.join(".DS_Store"), "tracked metadata").unwrap();
+        run_git_for_test(&["add", "--force", ".DS_Store"], Some(&path));
+        run_git_for_test(&["commit", "-m", "track finder metadata"], Some(&path));
+        std::fs::write(path.join(".DS_Store"), "changed metadata").unwrap();
+
+        let repo = git2::Repository::open(&path).unwrap();
+        let (dirty, changes) = GitOps::check_dirty(&repo).unwrap();
+
+        assert!(dirty);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, ".DS_Store");
+    }
+
+    #[test]
+    fn hydrated_lfs_content_matching_pointer_is_not_dirty() {
+        let (_tmp, path, _) = create_repo_with_tracking();
+        let content = b"hydrated lfs object\n";
+        let oid = GitOps::hex_bytes(Sha256::digest(content).as_ref());
+        let pointer = format!(
+            "version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {}\n",
+            content.len()
+        );
+        std::fs::write(path.join("asset.bin"), pointer).unwrap();
+        run_git_for_test(&["add", "asset.bin"], Some(&path));
+        run_git_for_test(&["commit", "-m", "track lfs pointer"], Some(&path));
+        std::fs::write(path.join("asset.bin"), content).unwrap();
+
+        let repo = git2::Repository::open(&path).unwrap();
+        let (dirty, changes) = GitOps::check_dirty(&repo).unwrap();
+
+        assert!(!dirty);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn hydrated_lfs_content_with_different_hash_remains_dirty() {
+        let (_tmp, path, _) = create_repo_with_tracking();
+        let content = b"hydrated lfs object\n";
+        let oid = GitOps::hex_bytes(Sha256::digest(content).as_ref());
+        let pointer = format!(
+            "version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {}\n",
+            content.len()
+        );
+        std::fs::write(path.join("asset.bin"), pointer).unwrap();
+        run_git_for_test(&["add", "asset.bin"], Some(&path));
+        run_git_for_test(&["commit", "-m", "track lfs pointer"], Some(&path));
+        std::fs::write(path.join("asset.bin"), b"modified lfs object\n").unwrap();
+
+        let repo = git2::Repository::open(&path).unwrap();
+        let (dirty, changes) = GitOps::check_dirty(&repo).unwrap();
+
+        assert!(dirty);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, "asset.bin");
+    }
+
+    #[test]
+    fn post_fetch_refresh_reuses_worktree_state_and_updates_remote_distance() {
+        let (_tmp, path, first_commit) = create_repo_with_tracking();
+        let repo = git2::Repository::open(&path).unwrap();
+        let signature = git2::Signature::now("remote", "remote@example.com").unwrap();
+        let parent = repo.find_commit(first_commit).unwrap();
+        let tree = parent.tree().unwrap();
+        let remote_commit = repo
+            .commit(None, &signature, &signature, "remote", &tree, &[&parent])
+            .unwrap();
+        repo.reference(
+            "refs/remotes/origin/main",
+            remote_commit,
+            true,
+            "模拟 fetch",
+        )
+        .unwrap();
+        repo.remote("origin", "https://example.com/repository.git")
+            .unwrap();
+        let mut config = repo.config().unwrap();
+        config.set_str("branch.main.remote", "origin").unwrap();
+        config
+            .set_str("branch.main.merge", "refs/heads/main")
+            .unwrap();
+        let mut cached = GitOps::inspect(&path, path.to_str().unwrap()).unwrap();
+        cached.dirty = true;
+        cached.dirty_files = vec!["保留的工作区状态.txt".to_string()];
+
+        let refreshed = GitOps::refresh_remote_state_after_fetch(&cached).unwrap();
+
+        assert!(refreshed.dirty);
+        assert_eq!(
+            refreshed.dirty_files,
+            vec!["保留的工作区状态.txt".to_string()]
+        );
+        assert_eq!(refreshed.behind_count, 1);
+        assert_eq!(refreshed.freshness, Freshness::HasUpdates);
+    }
+
+    #[test]
+    fn stash_signature_falls_back_without_git_identity() {
+        let (_tmp, path, _) = create_repo_with_tracking();
+        let repo = git2::Repository::open(&path).unwrap();
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "").unwrap();
+        config.set_str("user.email", "").unwrap();
+
+        let signature = GitOps::stash_signature(&repo).unwrap();
+
+        assert_eq!(signature.name(), Ok(GitOps::AUTOMATION_USER_NAME));
+        assert_eq!(signature.email(), Ok(GitOps::AUTOMATION_USER_EMAIL));
     }
 
     #[cfg(unix)]
@@ -2871,5 +3211,35 @@ mod tests {
         );
 
         assert!(matches!(status, FetchStatus::NetworkError { .. }));
+    }
+
+    #[test]
+    fn fetch_proxy_overrides_repository_local_proxy() {
+        let git_ops = GitOps::with_proxy(ProxyConfig {
+            enabled: true,
+            http_proxy: "http://host.docker.internal:7890".to_string(),
+            https_proxy: "http://host.docker.internal:7890".to_string(),
+        });
+        let mut command = std::process::Command::new("git");
+
+        git_ops.configure_fetch_proxy(&mut command, "origin");
+
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(arguments.contains(&"http.proxy=http://host.docker.internal:7890".to_string()));
+        assert!(arguments.contains(&"https.proxy=http://host.docker.internal:7890".to_string()));
+        assert!(
+            arguments.contains(&"remote.origin.proxy=http://host.docker.internal:7890".to_string())
+        );
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(key, _)| *key == "HTTPS_PROXY")
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned()),
+            Some("http://host.docker.internal:7890".to_string())
+        );
     }
 }

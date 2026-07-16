@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -30,8 +31,12 @@ pub struct Cli {
 pub enum Commands {
     /// 启动 React 本地实时控制台
     Serve {
-        /// 本机监听端口
-        #[arg(long, default_value_t = 38427)]
+        /// 监听地址；容器内使用 0.0.0.0，本机默认仅监听回环地址
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: IpAddr,
+
+        /// 后端监听端口
+        #[arg(long, default_value_t = 8615)]
         port: u16,
 
         /// 启动后不自动打开浏览器
@@ -213,6 +218,24 @@ mod tests {
                 assert!(path.is_none());
             }
             _ => panic!("应解析为 status 命令"),
+        }
+    }
+
+    #[test]
+    fn serve_uses_production_ports_and_loopback_by_default() {
+        let cli = Cli::try_parse_from(["getlatestrepo", "serve"]).expect("serve 参数应可解析");
+
+        match cli.command {
+            Commands::Serve {
+                bind,
+                port,
+                no_open,
+            } => {
+                assert_eq!(bind, "127.0.0.1".parse::<IpAddr>().unwrap());
+                assert_eq!(port, 8615);
+                assert!(!no_open);
+            }
+            _ => panic!("应解析为 serve 命令"),
         }
     }
 

@@ -11,3 +11,6 @@ docs/*
 !docs/images/**
 .playwright-mcp/
 .idea/
+.env
+.env.*
+!.env.docker.example

@@ -15,10 +15,10 @@ export default defineConfig({
   },
   server: {
     host: '127.0.0.1',
-    port: 5173,
+    port: 9215,
     strictPort: true,
     proxy: {
-      '/api': 'http://127.0.0.1:38427',
+      '/api': 'http://127.0.0.1:8615',
     },
   },
   test: {

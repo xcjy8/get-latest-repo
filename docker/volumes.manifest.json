@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "project": "getlatestrepo",
+  "runtime_label_namespace": "io.getlatestrepo.volume",
+  "test_label_namespace": "io.getlatestrepo.test",
+  "volumes": [
+    {
+      "compose_key": "getlatestrepo-data",
+      "name": "pro-get-latest-repo-data",
+      "driver": "local",
+      "purpose": "保存 GetLatestRepo 配置、SQLite 数据库与进程缓存",
+      "data_class": "runtime-truth"
+    }
+  ]
+}

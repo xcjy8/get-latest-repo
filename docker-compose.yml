@@ -1,0 +1,112 @@
+name: pro-get-latest-repo
+
+services:
+  backend:
+    image: pro-get-latest-repo-backend:latest
+    container_name: pro-get-latest-repo-backend
+    build:
+      context: .
+      target: backend
+      args:
+        APP_UID: ${GETLATESTREPO_UID:-1000}
+        APP_GID: ${GETLATESTREPO_GID:-1000}
+    restart: unless-stopped
+    environment:
+      GETLATESTREPO_CONFIG_DIR: /data
+      GETLATESTREPO_CONTAINER_SCAN_ROOT: /repositories
+      GETLATESTREPO_BACKEND_PORT: "8615"
+      GETLATESTREPO_PROXY_URL: ${GETLATESTREPO_PROXY_URL:-http://host.docker.internal:7890}
+      RUST_LOG: getlatestrepo=info,tower_http=warn
+      TZ: Asia/Shanghai
+      XDG_CACHE_HOME: /data/cache
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:8615:8615"
+    volumes:
+      - getlatestrepo-data:/data
+      - type: bind
+        source: ${GETLATESTREPO_SCAN_ROOT:?请设置 GETLATESTREPO_SCAN_ROOT}
+        target: /repositories
+      - type: bind
+        source: ${GETLATESTREPO_SSH_DIR:-${HOME}/.ssh}
+        target: /home/getlatestrepo/.ssh
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      - internal
+      - egress
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8615/api/v1/bootstrap"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      # 首次挂载大型仓库目录时，初始化索引可能持续数分钟；此期间不应误判服务故障。
+      start_period: 5m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  frontend:
+    image: pro-get-latest-repo-frontend:latest
+    container_name: pro-get-latest-repo-frontend
+    build:
+      context: .
+      target: frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:9215:8080"
+    networks:
+      - internal
+      - ingress
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+      - /var/cache/nginx:rw,noexec,nosuid,size=32m
+      - /var/run:rw,noexec,nosuid,size=4m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--output-document=/dev/null", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  getlatestrepo-data:
+    external: true
+    name: pro-get-latest-repo-data
+
+networks:
+  internal:
+    name: pro-get-latest-repo-internal
+    internal: true
+  ingress:
+    name: pro-get-latest-repo-ingress
+  egress:
+    name: pro-get-latest-repo-egress

@@ -11,6 +11,130 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+const MIB: u64 = 1024 * 1024;
+#[cfg(test)]
+const GIB: u64 = 1024 * MIB;
+
+/// 根据当前进程实际可用的 CPU 与内存计算不同负载的安全并发。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdaptiveConcurrency {
+    pub logical_cpus: usize,
+    pub memory_mib: Option<u64>,
+    pub fetch_jobs: usize,
+    pub io_jobs: usize,
+}
+
+impl AdaptiveConcurrency {
+    /// 读取容器配额或宿主机资源；配置值作为用户期望的最低并发。
+    pub fn detect(configured_floor: usize) -> Self {
+        let logical_cpus = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(1);
+        let memory_bytes = effective_memory_bytes();
+        Self::from_resources(logical_cpus, memory_bytes, configured_floor)
+    }
+
+    /// 网络任务每个 CPU 允许更多并发，但每个任务预留 256 MiB；
+    /// 文件系统任务更保守，避免 Docker bind mount 被随机小文件访问压垮。
+    fn from_resources(
+        logical_cpus: usize,
+        memory_bytes: Option<u64>,
+        configured_floor: usize,
+    ) -> Self {
+        let logical_cpus = logical_cpus.max(1);
+        let configured_floor = configured_floor.max(1);
+        let memory_fetch_limit = memory_bytes
+            .map(|bytes| (bytes / (256 * MIB)) as usize)
+            .unwrap_or_else(|| logical_cpus.saturating_mul(4));
+        let memory_io_limit = memory_bytes
+            .map(|bytes| (bytes / (512 * MIB)) as usize)
+            .unwrap_or_else(|| logical_cpus.saturating_mul(2));
+
+        let recommended_fetch = logical_cpus
+            .saturating_mul(4)
+            .min(memory_fetch_limit.max(1))
+            .clamp(4, 32);
+        let recommended_io = logical_cpus
+            .saturating_mul(2)
+            .min(memory_io_limit.max(1))
+            .clamp(2, 16);
+
+        Self {
+            logical_cpus,
+            memory_mib: memory_bytes.map(|bytes| bytes / MIB),
+            fetch_jobs: recommended_fetch.max(configured_floor).min(32),
+            io_jobs: recommended_io.max(configured_floor).min(16),
+        }
+    }
+}
+
+/// 容器内优先使用 cgroup 限额，避免按照宿主机总内存生成过高并发。
+fn effective_memory_bytes() -> Option<u64> {
+    let host = host_memory_bytes();
+    let cgroup = cgroup_memory_limit_bytes();
+    match (host, cgroup) {
+        (Some(host), Some(limit)) => Some(host.min(limit)),
+        (Some(host), None) => Some(host),
+        (None, Some(limit)) => Some(limit),
+        (None, None) => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn host_memory_bytes() -> Option<u64> {
+    let content = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kilobytes = content
+        .lines()
+        .find_map(|line| line.strip_prefix("MemTotal:"))?
+        .split_whitespace()
+        .next()?
+        .parse::<u64>()
+        .ok()?;
+    kilobytes.checked_mul(1024)
+}
+
+#[cfg(target_os = "macos")]
+fn host_memory_bytes() -> Option<u64> {
+    let name = std::ffi::CString::new("hw.memsize").ok()?;
+    let mut value = 0_u64;
+    let mut value_len = std::mem::size_of::<u64>();
+    let result = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            std::ptr::addr_of_mut!(value).cast(),
+            &mut value_len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (result == 0 && value_len == std::mem::size_of::<u64>()).then_some(value)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn host_memory_bytes() -> Option<u64> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_memory_limit_bytes() -> Option<u64> {
+    [
+        "/sys/fs/cgroup/memory.max",
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+    ]
+    .iter()
+    .find_map(|path| {
+        let value = std::fs::read_to_string(path).ok()?;
+        let bytes = value.trim().parse::<u64>().ok()?;
+        // cgroup v1 常用接近 u64::MAX 的数表示“不限制”，不能当成真实内存。
+        (bytes > 0 && bytes < (1_u64 << 60)).then_some(bytes)
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cgroup_memory_limit_bytes() -> Option<u64> {
+    None
+}
+
 /// Task results
 #[derive(Debug)]
 pub struct TaskResult<T> {
@@ -158,6 +282,31 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adaptive_concurrency_matches_current_docker_class_machine() {
+        let plan = AdaptiveConcurrency::from_resources(4, Some(4 * GIB), 5);
+
+        assert_eq!(plan.fetch_jobs, 16);
+        assert_eq!(plan.io_jobs, 8);
+        assert_eq!(plan.memory_mib, Some(4096));
+    }
+
+    #[test]
+    fn adaptive_concurrency_scales_up_and_respects_caps() {
+        let plan = AdaptiveConcurrency::from_resources(10, Some(24 * GIB), 5);
+
+        assert_eq!(plan.fetch_jobs, 32);
+        assert_eq!(plan.io_jobs, 16);
+    }
+
+    #[test]
+    fn adaptive_concurrency_limits_small_memory_machine() {
+        let plan = AdaptiveConcurrency::from_resources(2, Some(GIB), 1);
+
+        assert_eq!(plan.fetch_jobs, 4);
+        assert_eq!(plan.io_jobs, 2);
+    }
 
     #[test]
     fn test_concurrent_execute() {

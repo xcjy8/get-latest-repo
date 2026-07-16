@@ -54,6 +54,7 @@ chrono = { version = "0.4.45", features = ["serde"] }
 anyhow = "1.0.103"
 thiserror = "2.0.18"
 walkdir = "2.5.0"
+sha2 = "0.11.0"
 
 # Security scan
 url = "2.5.8"

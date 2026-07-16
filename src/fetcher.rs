@@ -193,6 +193,40 @@ impl Fetcher {
         self
     }
 
+    /// 批量任务启动前只探测一次代理端口，避免代理不可达时让数百个仓库分别重试。
+    async fn ensure_proxy_reachable(&self) -> Result<()> {
+        if !self.proxy.enabled {
+            return Ok(());
+        }
+
+        let proxy_url = url::Url::parse(&self.proxy.https_proxy)
+            .with_context(|| format!("代理地址格式无效：{}", self.proxy.https_proxy))?;
+        let host = proxy_url
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("代理地址缺少主机名：{}", self.proxy.https_proxy))?;
+        let port = proxy_url
+            .port_or_known_default()
+            .ok_or_else(|| anyhow::anyhow!("代理地址缺少有效端口：{}", self.proxy.https_proxy))?;
+
+        match tokio::time::timeout(
+            Duration::from_secs(3),
+            tokio::net::TcpStream::connect((host, port)),
+        )
+        .await
+        {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(error)) => anyhow::bail!(
+                "代理不可达：{}（{}）；已停止批量获取，避免重复失败",
+                self.proxy.https_proxy,
+                error
+            ),
+            Err(_) => anyhow::bail!(
+                "代理连接超时：{}；已停止批量获取，避免重复失败",
+                self.proxy.https_proxy
+            ),
+        }
+    }
+
     /// 在 fetch 前后归档远程跟踪分支。
     ///
     /// 归档失败只输出警告，不让整个 fetch 失败：fetch 是用户正在执行的主操作，
@@ -1259,6 +1293,7 @@ impl Fetcher {
         _db: &Database,
         progress: bool,
     ) -> Result<FetchSummary> {
+        self.ensure_proxy_reachable().await?;
         let exec_results = self.fetch_all_detailed(repos, progress).await;
 
         let mut summary = FetchSummary::new();
@@ -1355,6 +1390,7 @@ impl Fetcher {
         db: &Database,
         progress: bool,
     ) -> Result<Vec<Repository>> {
+        self.ensure_proxy_reachable().await?;
         // Get detailed execution results (include path change information)
         let exec_results = self.fetch_all_detailed(repos, progress).await;
 
@@ -1659,6 +1695,35 @@ mod tests {
             parse_fetch_risk_selection("   ", 5).unwrap(),
             FetchRiskSelection::None
         );
+    }
+
+    #[tokio::test]
+    async fn proxy_preflight_accepts_reachable_endpoint() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let fetcher = Fetcher::new(1, 10).with_proxy(ProxyConfig {
+            enabled: true,
+            http_proxy: format!("http://{address}"),
+            https_proxy: format!("http://{address}"),
+        });
+
+        fetcher.ensure_proxy_reachable().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn proxy_preflight_rejects_unreachable_endpoint() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let fetcher = Fetcher::new(1, 10).with_proxy(ProxyConfig {
+            enabled: true,
+            http_proxy: format!("http://{address}"),
+            https_proxy: format!("http://{address}"),
+        });
+
+        let error = fetcher.ensure_proxy_reachable().await.unwrap_err();
+
+        assert!(error.to_string().contains("代理不可达"));
     }
 
     #[test]

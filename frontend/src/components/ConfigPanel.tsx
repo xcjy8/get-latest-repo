@@ -97,7 +97,20 @@ export function ConfigPanel() {
             </button>
           </div>
           <div className="config-summary">
-            <span>并发 <b>{config?.defaultJobs ?? '—'}</b></span>
+            <span>获取并发 <b>{config?.effectiveFetchJobs ?? '—'}</b></span>
+            <span>扫描并发 <b>{config?.effectiveIoJobs ?? '—'}</b></span>
+            <span>
+              资源{' '}
+              <b>
+                {config === null
+                  ? '—'
+                  : `${config.logicalCpus} 核 / ${
+                      config.memoryMib === null
+                        ? '未知内存'
+                        : `${Math.round(config.memoryMib / 1024)} GiB`
+                    }`}
+              </b>
+            </span>
             <span>超时 <b>{config?.defaultTimeout ?? '—'}s</b></span>
             <span>默认深度 <b>{config?.defaultDepth ?? '—'}</b></span>
           </div>

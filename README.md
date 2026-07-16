@@ -52,7 +52,7 @@ getlatestrepo init ~/projects
 getlatestrepo serve
 ```
 
-浏览器会自动打开 `http://127.0.0.1:38427`。控制台可扫描、fetch、检查、安全拉取、强制拉取、备份同步、管理扫描源和丢弃指定仓库的本地修改。
+浏览器会自动打开 `http://127.0.0.1:8615`。前端开发服务器固定使用 `9215`，后端固定使用 `8615`。控制台可扫描、fetch、检查、安全拉取、强制拉取、备份同步、管理扫描源和丢弃指定仓库的本地修改。
 
 ### 3. 只看需要处理的问题
 
@@ -122,6 +122,43 @@ getlatestrepo serve --no-open
 实时链路使用可恢复 SSE：服务端按单调序号保存有限事件窗口，浏览器断线后携带 `Last-Event-ID` 续传；事件过快时前端按动画帧合并更新，避免重复布局和长任务。
 
 仓库表针对大数据量做了固定行高虚拟化，搜索、筛选和排序放入 Web Worker。仓库实体采用逐行订阅，单个仓库变化不会触发整表 React 重渲染；CSS 使用 `contain` 与 `content-visibility` 隔离布局和绘制。
+
+---
+
+## Docker 生产部署
+
+生产环境使用两个最小化容器：`pro-get-latest-repo-frontend` 仅运行 Nginx 并提供编译后的 `dist`，`pro-get-latest-repo-backend` 运行 Rust API、SSE 与 Git 操作。两个端口只绑定宿主机回环地址：前端 `9215`，后端 `8615`。
+
+```bash
+cp .env.docker.example .env
+# 编辑 .env，填写宿主机仓库根目录、UID/GID、SSH 目录与代理地址。
+./scripts/docker-volume-provision.sh
+docker compose build --pull
+docker compose up -d --wait
+```
+
+运行卷清单位于 `docker/volumes.manifest.json`。供给脚本只会创建清单中缺失的精确 external 卷，不会删除或重建已有卷。首次启动会在持久卷中初始化 `/repositories` 扫描源并建立索引。宿主机目录只作为运行时 bind mount 使用，不会写入镜像或 Git。访问 `http://127.0.0.1:9215`；后端健康接口为 `http://127.0.0.1:8615/api/v1/bootstrap`。
+
+Docker 默认强制所有 HTTP(S) Git 获取通过
+`http://host.docker.internal:7890`，并以命令级配置覆盖仓库中遗留的
+`127.0.0.1:7890`。批量获取前会先探测代理端口，不可达时立即停止，避免数百个仓库重复超时。Web 控制台根据容器实际 CPU 与内存配额动态计算获取并发和磁盘复检并发；配置面板会显示本次生效值。
+
+```bash
+docker compose ps
+docker compose logs -f --tail=200
+docker compose down
+```
+
+配置和 SQLite 数据保存在 external 卷 `pro-get-latest-repo-data` 中，`docker compose down --volumes` 也不会删除它。清空运行数据必须先备份，再由运维人员对 manifest 中的精确卷名执行人工删除；项目脚本不会自动删除运行卷。Docker 模式添加其他扫描源前，必须先在 Compose 中增加对应挂载，禁止把 Docker Socket 挂入容器。
+
+Docker 卷生命周期验证分为普通零卷测试和显式持久化专项测试：
+
+```bash
+# 静态合同、成功/失败、INT/TERM、SIGKILL TTL 恢复与 protected 门禁
+./scripts/verify-docker-volumes.sh
+```
+
+普通测试使用有容量上限的 `tmpfs` 覆盖 `/data`，不创建 named 或 anonymous volume。持久化专项测试使用唯一临时卷验证跨容器重建，所有临时资源均带完整归属和过期标签，并在测试前后比较 Docker daemon 的完整卷集合。
 
 ---
 

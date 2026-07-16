@@ -135,6 +135,10 @@ export type ScanSource = {
 
 export type AppConfig = {
   defaultJobs: number;
+  effectiveFetchJobs: number;
+  effectiveIoJobs: number;
+  logicalCpus: number;
+  memoryMib: number | null;
   defaultTimeout: number;
   defaultDepth: number;
   ignorePatterns: string[];

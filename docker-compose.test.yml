@@ -1,0 +1,45 @@
+name: ${GETLATESTREPO_TEST_PROJECT:?请设置 GETLATESTREPO_TEST_PROJECT}
+
+services:
+  ordinary-test:
+    image: ${GETLATESTREPO_BACKEND_IMAGE:-pro-get-latest-repo-backend:latest}
+    entrypoint:
+      - /bin/sh
+      - -eu
+      - -c
+    command:
+      - |
+        getlatestrepo --version
+        if [ "$${GETLATESTREPO_TEST_HOLD_SECONDS}" -gt 0 ]; then
+          sleep "$${GETLATESTREPO_TEST_HOLD_SECONDS}"
+        fi
+        exit "$${GETLATESTREPO_TEST_EXIT_CODE}"
+    environment:
+      GETLATESTREPO_TEST_EXIT_CODE: ${GETLATESTREPO_TEST_EXIT_CODE:-0}
+      GETLATESTREPO_TEST_HOLD_SECONDS: ${GETLATESTREPO_TEST_HOLD_SECONDS:-0}
+    labels:
+      io.getlatestrepo.test.project: getlatestrepo
+      io.getlatestrepo.test.scope: ordinary-test
+      io.getlatestrepo.test.run-id: ${GETLATESTREPO_TEST_RUN_ID:?请设置 GETLATESTREPO_TEST_RUN_ID}
+      io.getlatestrepo.test.created-at: ${GETLATESTREPO_TEST_CREATED_AT:?请设置 GETLATESTREPO_TEST_CREATED_AT}
+      io.getlatestrepo.test.expires-at: ${GETLATESTREPO_TEST_EXPIRES_AT:?请设置 GETLATESTREPO_TEST_EXPIRES_AT}
+    read_only: true
+    tmpfs:
+      - /data:rw,noexec,nosuid,size=64m
+      - /tmp:rw,noexec,nosuid,size=32m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - ordinary-test
+
+networks:
+  ordinary-test:
+    internal: true
+    labels:
+      io.getlatestrepo.test.project: getlatestrepo
+      io.getlatestrepo.test.scope: ordinary-test
+      io.getlatestrepo.test.run-id: ${GETLATESTREPO_TEST_RUN_ID:?请设置 GETLATESTREPO_TEST_RUN_ID}
+      io.getlatestrepo.test.created-at: ${GETLATESTREPO_TEST_CREATED_AT:?请设置 GETLATESTREPO_TEST_CREATED_AT}
+      io.getlatestrepo.test.expires-at: ${GETLATESTREPO_TEST_EXPIRES_AT:?请设置 GETLATESTREPO_TEST_EXPIRES_AT}
