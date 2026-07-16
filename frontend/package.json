@@ -1,0 +1,42 @@
+{
+  "name": "getlatestrepo-web",
+  "private": true,
+  "version": "0.1.12",
+  "type": "module",
+  "packageManager": "pnpm@11.13.0",
+  "engines": {
+    "node": ">=24.18.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build && node scripts/check-performance-budget.mjs",
+    "typecheck": "tsc -b --pretty false",
+    "lint": "oxlint --deny-warnings src",
+    "test": "vitest run",
+    "check": "tsc -b --pretty false && oxlint --deny-warnings src && vitest run && vite build && node scripts/check-performance-budget.mjs"
+  },
+  "dependencies": {
+    "@tanstack/react-virtual": "3.14.6",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "6.9.1",
+    "@testing-library/react": "16.3.2",
+    "@testing-library/user-event": "14.6.1",
+    "@babel/core": "8.0.1",
+    "@rolldown/plugin-babel": "0.2.3",
+    "@types/node": "26.1.1",
+    "@types/babel__core": "7.20.5",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.3",
+    "babel-plugin-react-compiler": "1.0.0",
+    "jsdom": "29.1.1",
+    "oxlint": "1.74.0",
+    "typescript": "7.0.2",
+    "vite": "8.1.4",
+    "vitest": "4.1.10"
+  }
+}

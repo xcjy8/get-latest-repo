@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GetLatestRepo 扫描报告</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            line-height: 1.6;
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        
+        header {
+            text-align: center;
+            padding: 3rem 0;
+            border-bottom: 1px solid #334155;
+            margin-bottom: 2rem;
+        }
+        
+        header h1 {
+            font-size: 2.5rem;
+            background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 0.5rem;
+        }
+        
+        header .subtitle {
+            color: #94a3b8;
+            font-size: 1rem;
+        }
+        
+        .summary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+        
+        .summary-card {
+            background: #1e293b;
+            border-radius: 12px;
+            padding: 1.5rem;
+            text-align: center;
+            border: 1px solid #334155;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        
+        .summary-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+        }
+        
+        .summary-card .number {
+            font-size: 2.5rem;
+            font-weight: bold;
+            margin-bottom: 0.5rem;
+        }
+        
+        .summary-card .label {
+            color: #94a3b8;
+            font-size: 0.9rem;
+        }
+        
+        .summary-card.total { border-top: 3px solid #3b82f6; }
+        .summary-card.behind { border-top: 3px solid #ef4444; }
+        .summary-card.synced { border-top: 3px solid #10b981; }
+        .summary-card.dirty { border-top: 3px solid #f59e0b; }
+        .summary-card.error { border-top: 3px solid #6b7280; }
+        
+        .summary-card.total .number { color: #3b82f6; }
+        .summary-card.behind .number { color: #ef4444; }
+        .summary-card.synced .number { color: #10b981; }
+        .summary-card.dirty .number { color: #f59e0b; }
+        .summary-card.error .number { color: #6b7280; }
+        
+        .repo-list {
+            background: #1e293b;
+            border-radius: 12px;
+            border: 1px solid #334155;
+            overflow: hidden;
+        }
+        
+        .repo-list-header {
+            padding: 1rem 1.5rem;
+            background: #0f172a;
+            border-bottom: 1px solid #334155;
+            font-weight: 600;
+            color: #94a3b8;
+        }
+        
+        .repo-item {
+            padding: 1.25rem 1.5rem;
+            border-bottom: 1px solid #334155;
+            transition: background 0.2s;
+        }
+        
+        .repo-item:last-child {
+            border-bottom: none;
+        }
+        
+        .repo-item:hover {
+            background: #252f47;
+        }
+        
+        .repo-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+        }
+        
+        .repo-name {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+        
+        .repo-path {
+            font-size: 0.85rem;
+            color: #64748b;
+            font-family: monospace;
+        }
+        
+        .repo-badges {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+        
+        .badge {
+            padding: 0.25rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 500;
+        }
+        
+        .badge.status-behind {
+            background: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+        
+        .badge.status-synced {
+            background: rgba(16, 185, 129, 0.2);
+            color: #10b981;
+            border: 1px solid rgba(16, 185, 129, 0.3);
+        }
+        
+        .badge.status-error {
+            background: rgba(107, 114, 128, 0.2);
+            color: #6b7280;
+            border: 1px solid rgba(107, 114, 128, 0.3);
+        }
+        
+        .badge.status-none {
+            background: rgba(148, 163, 184, 0.2);
+            color: #94a3b8;
+            border: 1px solid rgba(148, 163, 184, 0.3);
+        }
+        
+        .badge.branch {
+            background: #334155;
+            color: #94a3b8;
+        }
+        
+        .badge.dirty {
+            background: rgba(245, 158, 11, 0.2);
+            color: #f59e0b;
+            border: 1px solid rgba(245, 158, 11, 0.3);
+        }
+        
+        .repo-details {
+            margin-top: 0.75rem;
+            padding-top: 0.75rem;
+            border-top: 1px solid #334155;
+        }
+        
+        .commit-info {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            font-size: 0.9rem;
+            color: #94a3b8;
+        }
+        
+        .commit-message {
+            flex: 1;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        
+        .commit-author {
+            color: #64748b;
+        }
+        
+        .commit-time {
+            color: #64748b;
+            font-size: 0.85rem;
+        }
+        
+        .dirty-files {
+            margin-top: 0.5rem;
+            padding: 0.75rem;
+            background: rgba(245, 158, 11, 0.1);
+            border-radius: 8px;
+            border: 1px solid rgba(245, 158, 11, 0.2);
+        }
+        
+        .dirty-files-title {
+            font-size: 0.8rem;
+            color: #f59e0b;
+            margin-bottom: 0.5rem;
+        }
+        
+        .dirty-file-list {
+            list-style: none;
+            font-size: 0.85rem;
+            color: #94a3b8;
+            font-family: monospace;
+        }
+        
+        .dirty-file-list li {
+            padding: 0.15rem 0;
+        }
+        
+        .behind-info {
+            margin-top: 0.5rem;
+            padding: 0.75rem;
+            background: rgba(239, 68, 68, 0.1);
+            border-radius: 8px;
+            border: 1px solid rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+            font-size: 0.9rem;
+        }
+        
+        footer {
+            text-align: center;
+            padding: 2rem;
+            color: #64748b;
+            font-size: 0.9rem;
+        }
+        
+        @media (max-width: 768px) {
+            .container {
+                padding: 1rem;
+            }
+            
+            header h1 {
+                font-size: 1.8rem;
+            }
+            
+            .summary {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            
+            .repo-header {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📦 GetLatestRepo</h1>
+            <p class="subtitle">本地 Git 仓库扫描报告 | 生成时间 {{ generated_at }}</p>
+        </header>
+        
+        <div class="summary">
+            <div class="summary-card total">
+                <div class="number">{{ summary.total }}</div>
+                <div class="label">仓库总数</div>
+            </div>
+            <div class="summary-card behind">
+                <div class="number">{{ summary.has_updates }}</div>
+                <div class="label">需要更新</div>
+            </div>
+            <div class="summary-card synced">
+                <div class="number">{{ summary.synced }}</div>
+                <div class="label">已同步</div>
+            </div>
+            <div class="summary-card dirty">
+                <div class="number">{{ summary.dirty }}</div>
+                <div class="label">本地修改</div>
+            </div>
+            <div class="summary-card error">
+                <div class="number">{{ summary.unreachable }}</div>
+                <div class="label">远程不可达</div>
+            </div>
+        </div>
+        
+        <div class="repo-list">
+            <div class="repo-list-header">
+                📋 仓库列表（{{ repos.len() }}）
+            </div>
+            {% for repo in repos %}
+            <div class="repo-item">
+                <div class="repo-header">
+                    <div>
+                        <div class="repo-name">{{ repo.name }}</div>
+                        <div class="repo-path">{{ repo.path }}</div>
+                    </div>
+                    <div class="repo-badges">
+                        <span class="badge branch">{{ repo.branch }}</span>
+                        <span class="badge {{ repo.status_class }}">
+                            {{ repo.status_icon }} {{ repo.status_text }}
+                        </span>
+                        {% if repo.is_dirty %}
+                        <span class="badge dirty">📝 {{ repo.dirty_count }} 个文件</span>
+                        {% endif %}
+                    </div>
+                </div>
+                
+                <div class="repo-details">
+                    {% if repo.behind_count > 0 %}
+                    <div class="behind-info">
+                        ⚠️ 落后远程 {{ repo.behind_count }} 个提交
+                    </div>
+                    {% endif %}
+                    
+                    <div class="commit-info">
+                        <span class="commit-message">{{ repo.last_commit_message }}</span>
+                        <span class="commit-author">{{ repo.last_commit_author }}</span>
+                        <span class="commit-time">{{ repo.last_update }}</span>
+                    </div>
+                    
+                    {% if repo.is_dirty && !repo.dirty_files.is_empty() %}
+                    <div class="dirty-files">
+                        <div class="dirty-files-title">📝 已修改文件</div>
+                        <ul class="dirty-file-list">
+                            {% for file in repo.dirty_files %}
+                            <li>{{ file }}</li>
+                            {% endfor %}
+                        </ul>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        
+        <footer>
+            <p>由 GetLatestRepo 生成 | 本地 Git 仓库管理工具</p>
+        </footer>
+    </div>
+</body>
+</html>

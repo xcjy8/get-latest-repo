@@ -1,0 +1,13 @@
+.DS_Store
+.history
+.claude/
+AGENTS.md
+CLAUDE.md
+debug/
+target/
+reports/
+docs/*
+!docs/images/
+!docs/images/**
+.playwright-mcp/
+.idea/
