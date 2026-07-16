@@ -57,13 +57,13 @@ describe('操作批次状态', () => {
     });
   });
 
-  it('选择第二步不会伪造 Fetch 已完成', () => {
+  it('选择第二步后立即消费 Fetch 批次', () => {
     operationStore.setFetchReadiness({
-      batchId: null,
-      succeeded: 0,
+      batchId: 'fetch-batch',
+      succeeded: 401,
       failed: 0,
-      ready: false,
-      expiresAt: null,
+      ready: true,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
     });
     operationStore.set(operation({
       kind: 'pull-backup',
@@ -71,7 +71,11 @@ describe('操作批次状态', () => {
       sourceBatchId: 'fetch-batch',
     }));
 
-    expect(operationStore.getFetchReadinessSnapshot().ready).toBe(false);
+    expect(operationStore.getFetchReadinessSnapshot()).toMatchObject({
+      batchId: null,
+      succeeded: 0,
+      ready: false,
+    });
   });
 
   it('过期批次立即锁定第二步', () => {

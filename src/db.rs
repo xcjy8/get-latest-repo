@@ -632,6 +632,19 @@ impl Database {
             .optional()?)
     }
 
+    /// 判断 Fetch 批次是否已被任一更新操作消费；同一远程快照只允许更新一次。
+    pub fn fetch_batch_has_consumer(&self, batch_id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM operation_batches
+                WHERE source_batch_id = ?1
+                  AND kind IN ('pull-safe', 'pull-force', 'pull-backup')
+            )",
+            params![batch_id],
+            |row| row.get::<_, bool>(0),
+        )?)
+    }
+
     pub fn upsert_operation_item(&self, item: &OperationItemRecord) -> Result<()> {
         self.conn.execute(
             "INSERT INTO operation_items
@@ -956,5 +969,26 @@ mod tests {
             .unwrap();
 
         assert_eq!(existing.batch_id, "batch-one");
+    }
+
+    #[test]
+    fn fetch_batch_becomes_consumed_after_update_batch_is_created() {
+        let db = in_memory_database();
+        assert!(!db.fetch_batch_has_consumer("fetch-one").unwrap());
+
+        db.upsert_operation_batch(&OperationBatchRecord {
+            batch_id: "pull-one".to_string(),
+            request_id: "request-pull-one".to_string(),
+            kind: "pull-backup".to_string(),
+            state: "queued".to_string(),
+            message: "等待更新".to_string(),
+            details_json: "[]".to_string(),
+            source_batch_id: Some("fetch-one".to_string()),
+            ..OperationBatchRecord::default()
+        })
+        .unwrap();
+
+        assert!(db.fetch_batch_has_consumer("fetch-one").unwrap());
+        assert!(!db.fetch_batch_has_consumer("fetch-two").unwrap());
     }
 }

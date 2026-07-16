@@ -55,6 +55,8 @@ export function OperationBar() {
   const busy = operation?.state === 'queued' || operation?.state === 'running';
   const unsafeConnection = connection !== 'live';
   const remoteStateReady = readiness.ready;
+  const updating = busy && operation?.kind === 'pull-backup';
+  const secondStepSelected = remoteStateReady || updating;
   const issueCount = operation === null
     ? 0
     : operation.counters.failed + operation.counters.partial;
@@ -120,23 +122,25 @@ export function OperationBar() {
     <section className="operation-panel" aria-label="仓库操作">
       <div className="operation-actions" aria-label="仓库更新步骤">
         <div className="operation-step">
-          <span className={`step-number remote ${remoteStateReady ? 'completed' : ''}`}>1</span>
+          <span className={`step-number remote ${secondStepSelected ? 'completed' : ''}`}>1</span>
           <button
-            className={`action-tag remote-action ${remoteStateReady ? 'completed' : ''}`}
+            className={`action-tag remote-action ${secondStepSelected ? 'completed' : ''}`}
             disabled={busy}
             onClick={() => void start('fetch')}
           >
             获取远程状态
           </button>
         </div>
-        <span className={`step-connector ${remoteStateReady ? 'ready' : ''}`} aria-hidden="true" />
+        <span className={`step-connector ${secondStepSelected ? 'ready' : ''}`} aria-hidden="true" />
         <div className="operation-step">
-          <span className={`step-number backup ${remoteStateReady ? 'ready' : ''}`}>2</span>
+          <span className={`step-number backup ${secondStepSelected ? 'ready' : ''}`}>2</span>
           <button
             className="action-tag backup-action"
             disabled={busy || unsafeConnection || !remoteStateReady}
             onClick={() => void start('pull-backup')}
-            title={remoteStateReady ? '执行安全更新并保留恢复点' : '请先完成第 1 步：获取远程状态'}
+            aria-label={remoteStateReady
+              ? '执行安全更新并保留恢复点'
+              : '请先完成第一步：获取远程状态'}
           >
             安全更新且备份
           </button>

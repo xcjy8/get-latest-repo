@@ -68,6 +68,18 @@ export const operationStore = {
           expiresAt,
         });
       }
+    } else if (
+      operation?.kind === 'pull-safe'
+      || operation?.kind === 'pull-force'
+      || operation?.kind === 'pull-backup'
+    ) {
+      replaceFetchReadiness({
+        batchId: null,
+        succeeded: 0,
+        failed: 0,
+        ready: false,
+        expiresAt: null,
+      });
     }
     notify();
   },

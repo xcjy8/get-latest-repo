@@ -305,6 +305,9 @@ pub(super) fn reusable_fetch_batch(
     {
         return Ok(None);
     }
+    if database.fetch_batch_has_consumer(&batch.batch_id)? {
+        return Ok(None);
+    }
     let repositories = database.successful_fetch_repositories(&batch.batch_id)?;
     if repositories.is_empty() {
         return Ok(None);
